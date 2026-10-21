@@ -13,16 +13,23 @@ _T0 = time.time()
 _LAST_PW = [""]
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
-PROXY = os.environ.get("RIDI_PROXY")
-SEED = os.environ.get("PROXY_SEED", "")
+PROXY = None
 STAGGER = float(os.environ.get("STAGGER", "0") or 0)
 
-if PROXY and SEED:  # per-worker gateway session → distinct exit IP, no same-IP burst
-    parts = PROXY.split("@")
-    hostpart = parts[1]
-    user, _, pw = parts[0].rpartition(":")
-    user = f"{user}-session-{SEED}"
-    PROXY = f"http://{user}:{pw}@{hostpart}"
+
+def apply_seed():
+    """fresh Databay session suffix per identity attempt → new exit IP"""
+    global PROXY
+    base = os.environ.get("RIDI_PROXY", "")
+    if not base:
+        return
+    seed = os.urandom(4).hex()
+    head, _, tail = base.partition("@")
+    user, _, pw = head.rpartition(":")
+    PROXY = f"http://{user}-session-{seed}:{pw}@{tail}"
+
+
+apply_seed()
 
 if STAGGER:          # de-burst identity creation across prewarm lanes
     import time as _t
@@ -201,6 +208,7 @@ def main():
     for i in range(6):  # up to 6 attempts with fresh identities
         if not remaining:
             break
+        apply_seed()   # rotate Databay session per attempt (bad exit IPs happen)
         print(f"[w{os.getpid() % 10000}] account #{i+1} | left={len(remaining)}", flush=True)
         signal.alarm(int(os.environ.get("STAGE_TIMEOUT", "90")))  # hard cap/identity
         try:
