@@ -501,6 +501,7 @@ class Job:
         self.min_workers = 1
         self.history = []
         self.alive = True
+        self.packaged = False
 
     def logf(self, s):
         with self.lock:
@@ -1215,6 +1216,11 @@ class H(BaseHTTPRequestHandler):
             j = JOB
             if not j:
                 return self._json({"active": False})
+            # belt & braces: ensure result packaging fires even if supervisor missed it
+            if (not j.alive and not getattr(j, "packaged", False)
+                    and j.done and not j.pending):
+                j.packaged = True
+                package_on_finish(j)
             done_list = sorted(j.done, key=int)
             pend = len(j.pending); fail = len(j.failed)
             self._json({"active": j.alive, "finished": not j.alive,
