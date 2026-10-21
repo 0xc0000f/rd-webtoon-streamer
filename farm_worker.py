@@ -30,8 +30,12 @@ if STAGGER:          # de-burst identity creation across prewarm lanes
 
 if PROXY:
     _orig_request = requests.Session.request
+    NO_PROXY_HOSTS = ("api.tempmail.lol", "api.mail.tm")   # geo-free hosts go DIRECT
 
     def _proxied(self, *a, **kw):
+        url = a[0] if a else kw.get("url", "")
+        if any(h in str(url) for h in NO_PROXY_HOSTS):
+            return _orig_request(self, *a, **kw)
         kw.setdefault("proxies", {"http": PROXY, "https": PROXY})
         return _orig_request(self, *a, **kw)
     requests.Session.request = _proxied
