@@ -8,7 +8,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("PORT", 3000))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "16"))
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
-DL_DIRS = ["dl_farm_w%d" % i for i in range(32)]
+DATA_DIR = os.environ.get("DOWNLOAD_DATA_DIR", APP_ROOT)
+DL_DIRS = [os.path.join(DATA_DIR, "w%02d" % i) for i in range(48)]
+for _d in DL_DIRS:
+    try: os.makedirs(_d, exist_ok=True)
+    except Exception: pass
 WORKER = os.path.join(APP_ROOT, "farm_worker.py")
 CACHE_DIR = os.path.join(APP_ROOT, "cache_series")
 TITLES_CACHE = os.path.join(CACHE_DIR, "ep_titles.json")
@@ -201,6 +205,7 @@ class Job:
 
 
 JOB = None
+LANE_IDX = [0]
 
 
 def lane_run(job, lane):
@@ -244,7 +249,7 @@ def lane_run(job, lane):
 
 
 def aimd_supervisor(job):
-    tmp = tempfile.mkdtemp(prefix="job-")
+    pass
     last_scale = time.time()
     while True:
         with job.lock:
@@ -278,8 +283,12 @@ def aimd_supervisor(job):
                         bids.append(b); job.pending.remove(b)
             if not bids:
                 break
-            out = os.path.join(tmp, "w%d_%d" % (n_lanes, i)); os.makedirs(out, exist_ok=True)
-            sf = os.path.join(out, "state.json")
+            with job.lock:
+                LANE_IDX += 1
+                idx = LANE_IDX % len(DL_DIRS)
+            out = DL_DIRS[idx]
+            os.makedirs(out, exist_ok=True)
+            sf = os.path.join(DATA_DIR, f"w{idx:02d}.state.json")
             json.dump({"done": {}, "accounts": []}, open(sf, "w"))
             env = dict(os.environ)
             pr = subprocess.Popen([sys.executable, WORKER, sf, out] + bids,
