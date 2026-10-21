@@ -20,8 +20,11 @@ STAGGER = float(os.environ.get("STAGGER", "0") or 0)
 def apply_seed():
     """fresh Databay session suffix per identity attempt → new exit IP"""
     global PROXY
-    base = os.environ.get("RIDI_PROXY", "")
-    if not base:
+    base = os.environ.get("RIDI_PROXY", "").strip()
+    for pre in ("http://", "https://"):
+        if base.startswith(pre):
+            base = base[len(pre):]
+    if not base or "@" not in base:
         return
     seed = os.urandom(4).hex()
     head, _, tail = base.partition("@")
