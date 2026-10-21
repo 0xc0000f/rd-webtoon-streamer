@@ -23,6 +23,11 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 import shutil
 
+
+def disk_pct_of(path):
+    u = shutil.disk_usage(path)
+    return round(u.used * 100 / max(u.total, 1), 1)
+
 # ---------------- server library (/app/data/library/<series>/<NNN>-<slug>) --------
 def _page_sort_key(f):
     m = re.search(r"(\d+)", os.path.basename(f))
@@ -181,12 +186,12 @@ def sweep_loop():
             if old:
                 delete_library(bids=[b for _, b in sorted(old)])
                 print(f"[sweep] TTL purged {len(old)} items")
-        p = shutil.disk_usage(DATA_DIR).percent
+        p = disk_pct_of(DATA_DIR)
         if p > dkmax and idx:   # LRU purge oldest first until under threshold
             order = sorted(idx.items(), key=lambda kv: kv[1].get("created") or "")
             for _, (b, e) in enumerate(order):
                 delete_library(bids=[b])
-                p = shutil.disk_usage(DATA_DIR).percent
+                p = disk_pct_of(DATA_DIR)
                 if p <= dkmax:
                     break
             print(f"[sweep] disk {p:.0f}% → LRU purge done")
@@ -1083,7 +1088,7 @@ class H(BaseHTTPRequestHandler):
             return self._json({
                 "series": [{"name": k, "eps": v} for k, v in series.items()],
                 "total_mb": round(total, 1),
-                "disk_pct": shutil.disk_usage(DATA_DIR).percent})
+                "disk_pct": disk_pct_of(DATA_DIR)})
         elif p == "/api/pool":
             ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
             busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
@@ -1210,7 +1215,7 @@ class H(BaseHTTPRequestHandler):
             return self._json({
                 "series": [{"name": k, "eps": v} for k, v in series.items()],
                 "total_mb": round(total, 1),
-                "disk_pct": shutil.disk_usage(DATA_DIR).percent})
+                "disk_pct": disk_pct_of(DATA_DIR)})
         elif p == "/bundle.zip":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             bids = [b for b in (qs.get("bids") or [""])[0].split(",") if b.isdigit()]
