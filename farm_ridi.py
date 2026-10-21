@@ -212,31 +212,40 @@ def app_download(w, bids, outroot=None, dev=None):
                     "Content-Type": "application/json"}, timeout=25)
     got = []
     for bid in bids:
-        meta = a.get(f"https://download.ridibooks.com/stream/books/{bid}/files/metadata"
-                     f"?device_id={dev}&quality=recommended", timeout=30)
-        if meta.status_code != 200:
-            print(f"  [meta {bid}] {meta.status_code}"); continue
-        imgs = (meta.json().get("content_images") or [])
-        outdir = os.path.join(outroot, bid); os.makedirs(outdir, exist_ok=True)
-        k = page_key(bid); n = 0; f = 0
+        try:
+            meta = a.get(f"https://download.ridibooks.com/stream/books/{bid}/files/metadata"
+                         f"?device_id={dev}&quality=recommended", timeout=30)
+            if meta.status_code != 200:
+                print(f"  [meta {bid}] {meta.status_code}"); continue
+            imgs = (meta.json().get("content_images") or [])
+            outdir = os.path.join(outroot, bid); os.makedirs(outdir, exist_ok=True)
+            k = page_key(bid); n = 0; f = 0
 
-        def _fetch(i):
-            t = "cover" if i == 0 else "content"
-            u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
-                 f"?page_num={i}&type={t}&quality=recommended&device_id={dev}")
-            time.sleep(random.uniform(0.05, 0.4))
-            rr = a.get(u, timeout=90)
-            return i, rr
+            def _fetch(i):
+                t = "cover" if i == 0 else "content"
+                u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
+                     f"?page_num={i}&type={t}&quality=recommended&device_id={dev}")
+                last = None
+                for att in range(4):
+                    try:
+                        time.sleep(random.uniform(0.05, 0.35))
+                        return i, a.get(u, timeout=90)
+                    except requests.RequestException as e:
+                        last = e
+                        time.sleep(2 ** att + random.random())
+                raise last
 
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(PAGE_WORKERS) as pool:
-            for i, r2 in pool.map(_fetch, range(len(imgs))):
-                if r2.status_code != 200 or len(r2.content) < 300:
-                    f += 1; continue
-                d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
-                pt = d.update(r2.content) + d.finalize()
-                ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
-                open(os.path.join(outdir, f"{i:03d}{ext}"), "wb").write(pt); n += 1
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(PAGE_WORKERS) as pool:
+                for i, r2 in pool.map(_fetch, range(len(imgs))):
+                    if r2.status_code != 200 or len(r2.content) < 300:
+                        f += 1; continue
+                    d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
+                    pt = d.update(r2.content) + d.finalize()
+                    ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
+                    open(os.path.join(outdir, f"{i:03d}{ext}"), "wb").write(pt); n += 1
+        except Exception as e:
+            print(f"  [dl {bid}] err {str(e)[:140]}"); continue
         print(f"  ✔ {bid}: {n}/{len(imgs)} pages")
         got.append({"b_id": bid, "pages": n})
     return got
