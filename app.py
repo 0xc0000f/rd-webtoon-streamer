@@ -173,7 +173,9 @@ def ep_label(bid):
     name = (load_titles().get(bid) or "").strip() or ("ep_" + bid)
     no = m["no"].get(bid)
     head = f"{int(no):02d} " if no else ""
-    base = sanitize(f"{head}{name}")
+    # strip duplicated series title from the ep name: '<series> 1화' → '1화'
+    short = re.sub(r"^" + re.escape(series or "") + r"\s*", "", name).strip()
+    base = sanitize(f"{head}{short or name}")
     if series and series != name:
         return base, sanitize(f"{series}_{base}", 90)
     return base, base
@@ -339,15 +341,22 @@ def job_progress(j):
     try:
         files, steps, ppe_vals = 0, [], []
         acc_n = None
+        retry_pending = False
         for l in j.lanes:
             try:
                 tail = open(os.path.join(l["outroot"], "lane.log"), "rb").read()[-1200:]
-                for line in tail.decode(errors="ignore").splitlines():
+                a_i, s_i = -1, -1
+                ln = tail.decode(errors="ignore").splitlines()
+                for k, line in enumerate(ln):
                     macc = re.search(r"account #(\d+)", line)
                     if macc:
                         acc_n = max(acc_n or 1, int(macc.group(1)))
+                        a_i = k
                     if line.startswith("STEP"):
                         steps.append(line.strip())
+                        s_i = k
+                if a_i > s_i:      # last identity recycle is newest event
+                    retry_pending = True
             except Exception:
                 pass
             try:
@@ -377,7 +386,7 @@ def job_progress(j):
         j._prog_prev = (files, now)
         step = steps[-1] if steps else ("downloading pages" if files else "preparing")
         step = step.replace("STEP ", "", 1)
-        if acc_n and acc_n > 1:
+        if acc_n and acc_n > 1 and retry_pending:
             step = f"retrying (attempt {acc_n}/6) · {step}"
         return {"step": step, "pct": pct,
                 "eta_min": eta_min, "pages_now": files}
@@ -419,6 +428,8 @@ def lane_run(job, lane):
             miss = [b for b in bids if str(b) not in got]
             for b in miss:
                 job.tries[b] += 1
+            if miss:
+                job.last_fail_t = time.time()
             job.failed = [b for b in dict.fromkeys(job.failed + miss)
                           if job.tries.get(b, 0) >= 2 and str(b) not in job.done]
             frac = len(got) / max(len(bids), 1)
@@ -491,6 +502,9 @@ def aimd_supervisor(job):
                 env["REUSE_ACCT"] = pool_file
                 job.logf(f"pooled account → instant start ({os.path.basename(pool_file)})")
             spawn_pre(0)                     # keep the pool topped up
+            lf = getattr(job, "last_fail_t", 0)
+            if time.time() - lf < 25:        # backoff after a zero-download lane
+                time.sleep(max(0, 26 - (time.time() - lf)))
             pr = subprocess.Popen([sys.executable, WORKER, sf, out] + bids,
                                   stdout=open(os.path.join(out, "lane.log"), "ab"),
                                   stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)

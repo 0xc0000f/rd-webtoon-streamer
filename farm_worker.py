@@ -62,20 +62,39 @@ def build_account(remaining):
             j = json.load(open(REUSE_ACCT))
         except Exception as e:
             print("    pool read err:", str(e)[:80]); return None
-        F.TMAIL_TOKEN[0] = j["tmail_tok"]
-        uid, pw, addr, tok = j["uid"], j["pw"], j["addr"], j["tmail_tok"]
-        wck = F.full_login(uid, pw)
-        if not wck:
-            print("    pooled login failed"); return None
+        F.TMAIL_TOKEN[0] = j.get("tmail_tok") or ""
+        uid, pw, addr = j["uid"], j["pw"], j["addr"]
         w = requests.Session()
-        w.cookies.update(wck)
         w.headers["User-Agent"] = F.WEB_UA
+        ckdict = j.get("cookies") or {}
+        ok = False
+        if ckdict:  # cookie-direct reuse — no OTP roundtrip needed
+            w.cookies.update(ckdict)
+            try:
+                me = w.get("https://ridibooks.com/apps/account/accounts/me", timeout=20)
+                ok = '"idx"' in me.text
+                if ok:
+                    print("    pooled cookies valid → skip login")
+            except Exception as e:
+                print("    cookie check err:", str(e)[:60])
+        if not ok:   # fall back to password+OTP via that identity's mailbox
+            print("    cookies dead → otp re-login")
+            wck = F.full_login(uid, pw)
+            if not wck:
+                print("    pooled login failed (mailbox likely expired)")
+                return None
+            w = requests.Session()
+            w.cookies.update(wck)
+            w.headers["User-Agent"] = F.WEB_UA
         if not F.verify_adult(w):
             print("    adult verify failed (continuing)")
         claimed = []
         for c in dict.fromkeys(F.route_claims(w, remaining)):
             if c not in claimed:
                 claimed.append(c)
+        print(f"    claims={len(claimed)}/{len(set(remaining))}")
+        if not claimed and remaining:
+            return None      # nothing claimable with this identity → next one
         return claimed, w, str(uuid.uuid4()), uid, addr
     STEP("making new email")
     addr, tok = F.tmail_new()
