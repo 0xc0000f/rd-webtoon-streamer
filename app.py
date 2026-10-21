@@ -1244,12 +1244,13 @@ class H(BaseHTTPRequestHandler):
         mst = re.match(r"^/dl/([0-9a-f]+)/(?P<n>.+\.zip)$", p)
         if mst:
             fp = os.path.join(DATA_DIR, "dl", mst.group(1))
-            cand = os.path.join(fp, os.path.basename(mst.group("n")))
+            real_name = urllib.parse.unquote(os.path.basename(mst.group("n")))
+            cand = os.path.join(fp, real_name)
             data = open(cand, "rb").read() if os.path.exists(cand) else None
             if not data:
                 return self._json({"error": "expired or unknown token"}, 404)
-            fn = urllib.parse.quote(os.path.basename(cand))
-            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", os.path.basename(cand))[:70]
+            fn = urllib.parse.quote(real_name)
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", real_name)[:70].strip() or "export.zip"
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Disposition",
