@@ -1189,6 +1189,28 @@ class H(BaseHTTPRequestHandler):
                              f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
             self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
             return
+        if p == "/api/pool":
+            ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+            busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                        if time.time() - os.path.getmtime(f) < 240])
+            per = 75
+            eta = ((POOL_TARGET - ready) * per) // max(busy, 1) \
+                if ready < POOL_TARGET else 0
+            return self._json({"ready": ready, "refilling": busy,
+                               "target": POOL_TARGET, "eta_s": eta})
+        if p == "/api/library":
+            idx = lib_scan()
+            series = {}
+            for b, e in sorted(idx.items(), key=lambda kv: (kv[1].get("no") or 0)):
+                g = series.setdefault(e.get("series") or "?", [])
+                g.append({"b": b, "no": e.get("no"), "slug": e.get("slug"),
+                          "pages": e["pages"], "mb": round(e["bytes"] / 1048576, 1),
+                          "created": e.get("created")[:16] if e.get("created") else ""})
+            total = sum(x["mb"] for s in series.values() for x in s)
+            return self._json({
+                "series": [{"name": k, "eps": v} for k, v in series.items()],
+                "total_mb": round(total, 1),
+                "disk_pct": shutil.disk_usage(DATA_DIR).percent})
         elif p == "/bundle.zip":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             bids = [b for b in (qs.get("bids") or [""])[0].split(",") if b.isdigit()]
