@@ -121,6 +121,7 @@ def build_account(remaining):
                 claimed.append(c)
         print(f"    claims={len(claimed)}/{len(set(remaining))}")
         if not claimed and remaining:
+            print(f"    CLAIMS_EMPTY {','.join(sorted(set(remaining)))}", flush=True)
             return None      # nothing claimable with this identity → next one
         return claimed, w, str(uuid.uuid4()), uid, addr
     STEP("making new email")
@@ -248,6 +249,15 @@ def main():
               f"(t+{time.time()-t0:.0f}s)", flush=True)
     dt = time.time() - t0
     print(f"[w] FINISHED {TARGETS} in {dt:.1f}s (first page at +{first_page_at})", flush=True)
+    try:   # recycle the still-valid pooled identity so free eps don't burn new ones
+        if REUSE_ACCT and not remaining and TARGETS \
+                and all(str(t) in st["done"] for t in TARGETS):
+            nsrc = os.path.join(POOL_DIR,
+                                f"active_{int(time.time()*1000)}.json")
+            os.rename(REUSE_ACCT, nsrc)
+            print(f"[pool] recycled identity", flush=True)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

@@ -493,6 +493,7 @@ class Job:
         self.done = {}
         self.failed = []
         self.tries = {}
+        self.paid = set()
         self.log = []
         self.lock = threading.Lock()
         self.lanes = []
@@ -518,16 +519,37 @@ PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "3"))
 
 
 def take_pool():
-    """atomically consume one prewarmed account file (None if empty)"""
+    """consume one ready identity: prefer still-warm 'active' accounts, else fresh pool.
+    Atomic rename prevents two lanes grabbing the same file."""
     try:
-        fs = sorted(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
-        if not fs:
+        cands = sorted(glob.glob(os.path.join(POOL_DIR, "active_*.json"))) \
+            or sorted(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+        if not cands:
+            # fall back to a warmed inuse_ leftover from an interrupted run
+            cands = sorted(glob.glob(os.path.join(POOL_DIR, "inuse_*.json")))
+        if not cands:
             return None
-        dst = fs[0].replace("pool_", "inuse_")
-        os.rename(fs[0], dst)
+        src = cands[0]
+        base = os.path.basename(src).split("_", 1)[0]     # active/pool/inuse
+        dst = os.path.join(POOL_DIR, f"inuse_{int(time.time()*1000)}.json")
+        if src != dst:
+            os.rename(src, dst)
         return dst
     except Exception:
         return None
+
+
+# recycle a consumed-but-still-valid identity so free-eps don't burn new ones
+def release_active(reuse_path):
+    try:
+        if reuse_path and os.path.exists(reuse_path) and "pool" in POOL_DIR:
+            dst = os.path.join(POOL_DIR,
+                               f"active_{int(time.time()*1000)}.json")
+            os.rename(reuse_path, dst)
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def spawn_pre(delay=0):   # legacy shim — prewarm_loop owns refill now
@@ -661,9 +683,23 @@ def lane_run(job, lane):
             pass
         got = {k: v for k, v in (st.get("done") or {}).items()
                if int((v or {}).get("pages") or 0) > 0}
+        paid_cnt = {}
+        try:
+            full_log = open(logtail, "rb").read()[-4000:].decode(errors="ignore")
+            for line in full_log.splitlines():
+                mpaid = re.search(r"CLAIMS_EMPTY ([\d,]+)", line)
+                if mpaid:
+                    for x in mpaid.group(1).split(","):
+                        if x.isdigit():
+                            paid_cnt[x] = paid_cnt.get(x, 0) + 1
+        except Exception:
+            pass
+        # ≥2 identity attempts with zero claim path → treat as 'no free path'
+        paid_here = {b for b, c in paid_cnt.items() if c >= 2}
         with job.lock:
             job.done.update(got)
-            miss = [b for b in bids if str(b) not in got]
+            job.paid |= (paid_here & {str(b) for b in bids}) - set(job.done)
+            miss = [b for b in bids if str(b) not in got and str(b) not in job.paid]
             for b in miss:
                 job.tries[b] += 1
             if miss:
@@ -724,6 +760,8 @@ def aimd_supervisor(job):
                 bids = []
                 for b in list(job.pending)[:take]:
                     if str(b) not in job.done:
+                        if str(b) in job.paid:
+                            job.pending.remove(b); continue
                         bids.append(b); job.pending.remove(b)
             if not bids:
                 break
@@ -953,11 +991,14 @@ function renderEps(){
  <span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div></div>`;
  let ck=`<label style="display:flex;gap:6px;align-items:center;font-size:12px;color:#aaa">
   <input type=checkbox id=cacheck> cache ไว้บน server</label>`;
- EPS.forEach((e,i)=>{h+=`<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
-  <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
+ EPS.forEach((e,i)=>{const tag=e.paid?'<span class=muted>💸 no free path</span>'
+   :(e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
+    :'<span class=muted>—</span>');
+  h+=`<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
+  <input type=checkbox class=sel data-b='${e.b}' ${(e.pages||e.paid?'disabled':'')} onchange=tog(this)>
   <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1 title='no-cache mode: โหลดซ้ำ = identity ใหม่ทุกครั้ง'>${esc(e.t)}</span></label>`+
-  (e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
-   :'<span class=muted>—</span>')+'</div>'});
+   tag+'</div>'});
+ if(EPS.some(e=>!e.pages&&!e.paid)){h+=''}
  h+=`<div style="margin-top:8px">${ck}</div>`;
  $('out').innerHTML=h;
  const bar=$('actionbar');
@@ -997,6 +1038,8 @@ function poll(force){
   if(j.active&&pr.step)statusShow(j);
   let changed=false;
   (j.log&&j.log.length)&&statusShow(j);
+  (j.paid_list||[]).forEach(b=>{const e=EPS.find(x=>x.b===b);
+   if(e&&!e.paid){e.paid=true;changed=true}});
   EPS.forEach((e,i)=>{
    if(j.done_list.includes(e.b)&&!e.pages){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
@@ -1040,11 +1083,13 @@ function delEps(b){if(!confirm('ลบตอนนี้จาก server cache?'
 function delSeries(n){if(!confirm('ลบทุกตอนของซีรีส์นี้จาก server cache?'))return;
  fetch('/api/delete',{method:'POST',body:JSON.stringify({series:n})}).then(loadLib)}
 function rowHTML(e,i,fresh){
+ const tag=e.paid?'<span class=muted>💸 no free path</span>'
+   :(e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
+    :'<span class=muted>⏳</span>');
  return `<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
- <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
+ <input type=checkbox class=sel data-b='${e.b}' ${(e.pages||e.paid?'disabled':'')} onchange=tog(this)>
  <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1>${esc(e.t)}</span></label>`+
- (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
-  :'<span class=muted>⏳</span>')+'</div>'}
+ tag+'</div>'}
 function statusShow(j){
  let s=$('status');
  if(!s){s=document.createElement('pre');s.id='status';$('out').before(s)}
@@ -1236,7 +1281,8 @@ class H(BaseHTTPRequestHandler):
                         "workers_target": j.workers_target,
                         "max_workers": j.max_workers,
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
-                        "pending_n": pend + fail, "fail_n": fail,
+                        "paid_list": sorted(j.paid),
+                        "pending_n": max(0, pend + fail), "fail_n": fail,
                         "progress": job_progress(j), "cache": j.cache,
                         "stream_url": j.stream_url,
                         "pool_ready": len(glob.glob(
