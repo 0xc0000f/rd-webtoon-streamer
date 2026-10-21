@@ -58,7 +58,10 @@ def tmail_new():
                              headers={"User-Agent": WEB_UA},
                              timeout=30 if not att else 45)
             a = r.json()
-            return a["address"], a["token"]
+            addr, tok = a.get("address"), a.get("token")
+            if addr and tok:
+                return addr, tok
+            raise ValueError(f"bad payload {str(a)[:60]}")
         except Exception as e:
             last = e
             print("  [tmail gen retry]", str(e)[:80]); time.sleep(3 * (att + 1))
