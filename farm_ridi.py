@@ -250,7 +250,9 @@ def page_key(b):
     s = "stream" + b[:max(len(b)-6, 0)] + b
     return hashlib.sha1(s.encode()).hexdigest()[:16].encode()
 
-PAGE_WORKERS = int(os.environ.get("PAGE_WORKERS") or 8)
+PAGE_WORKERS = int(os.environ.get("PAGE_WORKERS") or 16)
+JIT_LO, JIT_HI = (lambda a, b: (a, b))(
+    *(float(x) for x in os.environ.get("PAGE_JITTER", "0.3-1.2").split("-", 1)))
 
 
 def app_download(w, bids, outroot=None, dev=None):
@@ -287,7 +289,7 @@ def app_download(w, bids, outroot=None, dev=None):
                 last = None
                 for att in range(4):
                     try:
-                        time.sleep(random.uniform(0.05, 0.35))
+                        time.sleep(random.uniform(JIT_LO, JIT_HI))
                         return i, a.get(u, timeout=90)
                     except requests.RequestException as e:
                         last = e

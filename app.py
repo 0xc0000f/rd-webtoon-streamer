@@ -13,19 +13,186 @@ DL_DIRS = [os.path.join(DATA_DIR, "w%02d" % i) for i in range(48)]
 for _d in DL_DIRS:
     try: os.makedirs(_d, exist_ok=True)
     except Exception: pass
+LIB_DIR = os.path.join(DATA_DIR, "library")
+os.makedirs(LIB_DIR, exist_ok=True)
+SETTINGS_F = os.path.join(DATA_DIR, "settings.json")
 WORKER = os.path.join(APP_ROOT, "farm_worker.py")
 CACHE_DIR = os.path.join(APP_ROOT, "cache_series")
 TITLES_CACHE = os.path.join(CACHE_DIR, "ep_titles.json")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+import shutil
+
+# ---------------- server library (/app/data/library/<series>/<NNN>-<slug>) --------
+def _page_sort_key(f):
+    m = re.search(r"(\d+)", os.path.basename(f))
+    return int(m.group(1)) if m else 0
+
+
+def load_settings():
+    d = {"ttl_days": 0, "disk_pct": 80}
+    try:
+        d.update(json.load(open(SETTINGS_F)))
+    except Exception:
+        pass
+    return d
+
+
+def save_settings(s):
+    json.dump(s, open(SETTINGS_F, "w"))
+
+
+def lib_scan():
+    """index every library item from real files (spec: directory scan)"""
+    out = {}
+    for sj in glob.glob(os.path.join(LIB_DIR, "*", "*", ".meta.json")):
+        try:
+            m = json.load(open(sj))
+            b = str(m.get("b_id") or "")
+            if not b:
+                continue
+            d = os.path.dirname(sj)
+            imgs = [f for f in os.listdir(d)
+                    if re.match(r"^page_\d+\.(jpg|webp)$", f)]
+            if not imgs:
+                continue
+            out[b] = {
+                "path": d,
+                "series": m.get("series") or "",
+                "title": m.get("title") or "",
+                "no": int(m.get("no") or 0),
+                "slug": m.get("slug") or "",
+                "pages": len(imgs),
+                "bytes": sum(os.path.getsize(os.path.join(d, f)) for f in imgs),
+                "created": m.get("created") or "",
+            }
+        except Exception:
+            pass
+    return out
+
+
+_LIB_CACHE = {"t": 0.0, "idx": {}}
+
+
+def lib_index():
+    now = time.time()
+    if now - _LIB_CACHE["t"] > 5:
+        _LIB_CACHE["idx"] = lib_scan()
+        _LIB_CACHE["t"] = now
+    return _LIB_CACHE["idx"]
+
 
 def find_pages(bid):
+    e = lib_index().get(str(bid))
+    if e:
+        pats = [os.path.join(e["path"], "page_*.jpg"),
+                os.path.join(e["path"], "page_*.webp")]
+        fl = sorted(sum((glob.glob(p) for p in pats), []), key=_page_sort_key)
+        if fl:
+            return fl
     for d in DL_DIRS:
         p = os.path.join(APP_ROOT, d, bid)
         if os.path.isdir(p) and any(f.endswith((".webp", ".jpg")) for f in os.listdir(p)):
             return sorted(glob.glob(os.path.join(p, "*.webp")) +
                           glob.glob(os.path.join(p, "*.jpg")))
     return None
+
+
+def migrate_to_library(bid):
+    """move a finished lane output into the library layout + write .meta.json"""
+    try:
+        src = None
+        for d in DL_DIRS:
+            p = os.path.join(APP_ROOT, d, str(bid))
+            if os.path.isdir(p) and any(
+                    f.endswith((".webp", ".jpg")) for f in os.listdir(p)):
+                src = p; break
+        if not src:
+            return
+        m0 = load_meta()
+        root = (m0.get("root") or {}).get(str(bid)) or bid
+        ttl_series = (m0.get("title") or {}).get(root) or ""
+        no = int((m0.get("no") or {}).get(str(bid)) or 1)
+        name = (load_titles().get(str(bid)) or "").strip() or ("ep_" + str(bid))
+        slug_raw = re.sub(r"^" + re.escape(ttl_series) + r"\s*", "", name).strip() or name
+        series_dir = sanitize(ttl_series or "series-" + str(root), 80)
+        item_name = f"{no:03d}-{sanitize(slug_raw, 60)}"
+        dst = os.path.join(LIB_DIR, series_dir, item_name)
+        os.makedirs(dst, exist_ok=True)
+        imgs = sorted(glob.glob(os.path.join(src, "*.webp")) +
+                      glob.glob(os.path.join(src, "*.jpg")),
+                      key=lambda f: (os.path.dirname(f), _page_sort_key(f)))
+        n = 0
+        for f in imgs:
+            ext = ".jpg" if f.endswith(".jpg") else ".webp"
+            n += 1
+            os.replace(f, os.path.join(dst, f"page_{n:03d}{ext}"))
+        json.dump({"b_id": bid, "title": name, "slug": sanitize(slug_raw, 60),
+                   "series": ttl_series, "root": root, "no": no,
+                   "pages": n, "created": time.strftime("%Y-%m-%dT%H:%M:%S")},
+                  open(os.path.join(dst, ".meta.json"), "w"))
+        shutil.rmtree(src, ignore_errors=True)
+    except Exception as e:
+        print("[lib] migrate err", bid, str(e)[:100])
+
+
+def delete_library(bids=None, series=None):
+    idx = lib_scan()
+    targets = {}
+    for b, e in idx.items():
+        if bids and str(b) in {str(x) for x in bids}:
+            targets[e["path"]] = b
+        if series and e.get("series") == series:
+            targets[e["path"]] = b
+    n = 0
+    for path, b in targets.items():
+        try:
+            shutil.rmtree(path); n += 1
+        except OSError:
+            pass
+    # also purge legacy lane copies so disk frees up
+    for d in DL_DIRS:
+        for b in (bids or [x[1] for x in targets.values()]):
+            try:
+                shutil.rmtree(os.path.join(APP_ROOT, d, str(b)), ignore_errors=True)
+            except Exception:
+                pass
+    _LIB_CACHE["t"] = 0.0
+    return n
+
+
+def sweep_loop():
+    while True:
+        time.sleep(3600)
+        s = load_settings()
+        ttl = int(s.get("ttl_days") or 0)
+        dkmax = int(s.get("disk_pct") or 80)
+        idx = lib_scan()
+        if ttl > 0:
+            cut = time.time() - ttl * 86400
+            old = []
+            for b, e in idx.items():
+                try:
+                    ctm = os.path.getctime(e["path"])
+                except OSError:
+                    continue
+                if ctm < cut:
+                    old.append((e["created"], b))
+            if old:
+                delete_library(bids=[b for _, b in sorted(old)])
+                print(f"[sweep] TTL purged {len(old)} items")
+        p = shutil.disk_usage(DATA_DIR).percent
+        if p > dkmax and idx:   # LRU purge oldest first until under threshold
+            order = sorted(idx.items(), key=lambda kv: kv[1].get("created") or "")
+            for _, (b, e) in enumerate(order):
+                delete_library(bids=[b])
+                p = shutil.disk_usage(DATA_DIR).percent
+                if p <= dkmax:
+                    break
+            print(f"[sweep] disk {p:.0f}% → LRU purge done")
+
+
+threading.Thread(target=sweep_loop, daemon=True).start()
 
 
 # ---------------- upstream clients ----------------
@@ -251,8 +418,15 @@ def series_overview(root_bid, eps):
 
 # ---------------- job manager with AIMD autoscaling ----------------
 class Job:
-    def __init__(self, bids):
+    def __init__(self, bids, cache=False):
+        import uuid as _u
         self.all = list(bids)
+        self.cache = bool(cache)
+        self.stream_tok = _u.uuid4().hex[:12]
+        self.stream_url = None
+        pool_n = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+        base = min(MAX_WORKERS, 4 if pool_n >= 3 else 2)
+        self.workers_target = max(base, 1)
         self.pending = list(self.all)
         self.done = {}
         self.failed = []
@@ -276,7 +450,8 @@ LANE_IDX = [0]
 
 # ---- prewarmed identity pool: ready accounts so downloads skip email/signup ----
 POOL_DIR = os.path.join(DATA_DIR, "pool")
-POOL_TARGET = int(os.environ.get("POOL_TARGET", "2"))
+POOL_TARGET = int(os.environ.get("POOL_TARGET", "10"))
+PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "3"))
 
 
 def take_pool():
@@ -292,45 +467,45 @@ def take_pool():
         return None
 
 
-def spawn_pre(delay=0):
-    def _w():
-        time.sleep(delay)
-        while len(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))) < POOL_TARGET \
-                and len(glob.glob(os.path.join(POOL_DIR, "*.busy"))) < 2:
-            try:
-                os.makedirs(POOL_DIR, exist_ok=True)
-                busy = os.path.join(POOL_DIR,
-                                    f"pre_{int(time.time()*1000)}.busy")
-                open(busy, "w").close()
-                env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR)
-                subprocess.Popen(
-                    [sys.executable, WORKER,
-                     os.path.join(DATA_DIR, "pre.state.json"), DATA_DIR],
-                    stdout=open(os.path.join(POOL_DIR, "pre.log"), "ab"),
-                    stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
-                # one at a time; loop revisits every cycle
-                break
-            except Exception:
-                return
-
-    threading.Thread(target=_w, daemon=True).start()
+def spawn_pre(delay=0):   # legacy shim — prewarm_loop owns refill now
+    pass
 
 
 def prewarm_loop():
+    """continuous staggered identity farming — keep ≥POOL_TARGET ready 24/7,
+    ≤PREWARM_CONC builds at once, each on its own Databay session/IP, jittered start"""
     while True:
-        if True:
+        try:
             n = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
-            b = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
-                     if time.time() - os.path.getmtime(f) < 240])
-            if n < POOL_TARGET and b == 0:
-                spawn_pre()
+            busy = [f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                    if time.time() - os.path.getmtime(f) < 260]
             for f in glob.glob(os.path.join(POOL_DIR, "*.busy")):
-                if time.time() - os.path.getmtime(f) > 300:
+                if time.time() - os.path.getmtime(f) > 270:
                     try:
                         os.remove(f)
                     except OSError:
                         pass
-        time.sleep(20)
+            if n < POOL_TARGET and len(busy) < PREWARM_CONC:
+                env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR,
+                           PROXY_SEED=os.urandom(4).hex(),
+                           STAGGER=str(random.randint(0, 35)))
+                try:
+                    os.makedirs(POOL_DIR, exist_ok=True)
+                    open(os.path.join(
+                        POOL_DIR, f"pre_{int(time.time()*1000)}.busy"), "w").close()
+                    subprocess.Popen(
+                        [sys.executable, WORKER,
+                         os.path.join(DATA_DIR, "pre.state.json"), DATA_DIR],
+                        stdout=open(os.path.join(POOL_DIR, "pre.log"), "ab"),
+                        stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(18)
+
+
+import random
 
 
 threading.Thread(target=prewarm_loop, daemon=True).start()
@@ -532,14 +707,90 @@ def aimd_supervisor(job):
                 if dirty:
                     save_titles(titles)
                 job.logf("ALL DONE")
+                package_on_finish(job)
                 return
 
 
-def start_job(bids):
+def package_on_finish(job):
+    """cache → library layout; default (no-cache) → stage stream zip for clicker"""
+    def _w():
+        with job.lock:
+            done_bids = [b for b in job.done]
+        try:
+            if job.cache:
+                for b in done_bids:
+                    migrate_to_library(b)
+                job.stream_url = None
+                job.logf(f"library updated ({len(done_bids)} eps cached)")
+                return
+            d = os.path.join(DATA_DIR, "dl", job.stream_tok)
+            os.makedirs(d, exist_ok=True)
+            if len(done_bids) == 1:
+                b = str(done_bids[0])
+                _, folder = ep_label(b)
+                fname = sanitize(folder, 70) or ("EP" + b)
+                arc_base = folder
+            else:
+                m0 = load_meta()
+                root0 = (m0.get("root") or {}).get(str(done_bids[0]), "")
+                sname = sanitize((m0.get("title") or {}).get(root0, "") or "export", 60)
+                fname = f"{sname}_selected"
+                arc_base = None       # per-ep folders inside
+            zfpath = os.path.join(d, fname + ".zip")
+            with zipfile.ZipFile(zfpath, "w", zipfile.ZIP_STORED) as z:
+                for b in sorted(done_bids, key=int):
+                    pages = find_pages(b)
+                    if not pages:
+                        continue
+                    _, folder = ep_label(b)
+                    for f in pages:
+                        z.write(f, arcname=(arc_base and f"{folder}/{os.path.basename(f)}"
+                                            or f"{folder}/{os.path.basename(f)}"))
+            job.stream_url = f"/dl/{job.stream_tok}/{urllib.parse.quote(fname)}.zip"
+            job.logf(f"stream zip ready: {os.path.basename(zfpath)}")
+            if not job.cache:   # no-library mode → drop working copies
+                for b in done_bids:
+                    for dd in DL_DIRS:
+                        shutil.rmtree(os.path.join(APP_ROOT, dd, str(b)),
+                                      ignore_errors=True)
+        except Exception as e:
+            job.logf(f"package err {str(e)[:90]}")
+
+    threading.Thread(target=_w, daemon=True).start()
+
+
+RESULT_MAX_AGE_HOURS = float(os.environ.get("RESULT_MAX_AGE_HOURS", "48"))
+
+
+def dl_sweeper():
+    """transient result store: mtime-based purge after RESULT_MAX_AGE_HOURS (default 48h);
+    within window re-download serves instantly"""
+    while True:
+        time.sleep(300)
+        try:
+            root = os.path.join(DATA_DIR, "dl")
+            now = time.time()
+            cut = now - RESULT_MAX_AGE_HOURS * 3600
+            for d in glob.glob(os.path.join(root, "*")):
+                try:
+                    newest = max(os.path.getmtime(p) for p in glob.glob(
+                        os.path.join(d, "*")))
+                    if newest < cut:
+                        shutil.rmtree(d, ignore_errors=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+
+threading.Thread(target=dl_sweeper, daemon=True).start()
+
+
+def start_job(bids, cache=False):
     global JOB
     if not bids:
         return None
-    job = Job(bids)
+    job = Job(bids, cache=cache)
     JOB = job
     threading.Thread(target=aimd_supervisor, args=(job,), daemon=True).start()
     return job
@@ -585,12 +836,22 @@ backdrop-filter:blur(6px);z-index:8;display:none;padding:10px 16px;
 display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 #status{font-family:monospace;font-size:12px;color:#9fe;background:#0b0b0f;border:1px solid var(--line);
 border-radius:10px;padding:8px 12px;margin:10px auto;max-width:900px;display:none;white-space:pre-wrap}
+.cachewrap{margin-top:30px}.chead{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.cep{display:flex;gap:10px;align-items:center;border-bottom:1px solid var(--line);padding:8px 4px;font-size:13px}
+.cep img{width:34px;height:46px;object-fit:cover;border-radius:5px;flex:none;background:#222}
+.cep a{color:#9cf;text-decoration:none;font-size:12px;white-space:nowrap}
+.dbtn{background:#3a2f35;border:1px solid #55404a;color:#ffb3c8;padding:6px 10px;border-radius:8px;
+font-size:12px;cursor:pointer}
+select,input[type=number]{background:var(--card);border:1px solid var(--line);color:#eee;
+padding:7px 10px;border-radius:8px;font-size:13px}
 </style></head><body>
 <div id=pbar></div>
 <header><div class=logo>📕 RIDI Webtoon DL</div>
 <input id=q type=text placeholder="พิมพ์ชื่อเรื่อง หรือวาง URL/รหัสตอน">
-<button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span></header>
+<button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span>
+<span class=pill id=poolpill style=color:#ffd479>identity pool …</span></header>
 <main id=out></main>
+<section class=cachewrap id=cache></section>
 <div id=actionbar></div>
 <script>
 let SERIES=[],EPS=[],SEL=new Set(),CUR=null,POLLT=null;
@@ -619,11 +880,14 @@ function renderEps(){
  <div class=serieshead><img src='${CUR.cover||''}' onerror="this.style.opacity=.15">
  <div><h3 style=margin:0>${esc(CUR.title||'')}</h3>
  <span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div></div>`;
+ let ck=`<label style="display:flex;gap:6px;align-items:center;font-size:12px;color:#aaa">
+  <input type=checkbox id=cacheck> cache ไว้บน server</label>`;
  EPS.forEach((e,i)=>{h+=`<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
   <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
-  <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1>${esc(e.t)}</span></label>`+
-  (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`
+  <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1 title='no-cache mode: โหลดซ้ำ = identity ใหม่ทุกครั้ง'>${esc(e.t)}</span></label>`+
+  (e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
    :'<span class=muted>—</span>')+'</div>'});
+ h+=`<div style="margin-top:8px">${ck}</div>`;
  $('out').innerHTML=h;
  const bar=$('actionbar');
  const nDL=EPS.filter(e=>!e.pages).length, nDone=EPS.filter(e=>e.pages).length;
@@ -634,13 +898,16 @@ function renderEps(){
 function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b);
  const btn=document.querySelector('#actionbar button');if(btn)btn.textContent=`⬇ โหลดตอนที่เลือก (${SEL.size})`}
 function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)});renderEps()}
-let DL_BIDS=[];
+let DL_BIDS=[],STREAMED=false;
 function clickA(href){const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),400)}
+const CK=()=>$('cacheck')?$('cacheck').checked:false;
 async function dlSelected(){
  const missing=[...SEL].filter(b=>!EPS.find(e=>e.b===b&&e.pages));
  if(!missing.length)return alert('เลือกตอนที่ยังไม่ได้โหลดก่อน');
- DL_BIDS=missing.slice();
- const r=await fetch('/api/download',{method:'POST',body:JSON.stringify({bids:missing})});const j=await r.json();
+ DL_BIDS=missing.slice();STREAMED=false;
+ const r=await fetch('/api/download',{method:'POST',body:JSON.stringify({bids:missing,cache:CK()})});
+ await r.json();
+ statusShow({progress:{step:'queued — picking pooled identity…',pct:0},workers_now:0,max_workers:16,done_n:0,pending_n:missing.length,fail_n:0});
  poll(true)}
 function bundleZip(){const done=EPS.filter(e=>e.pages).map(e=>e.b);location.href='/bundle.zip?bids='+done.join(',')}
 function home(){$('out').innerHTML='<h3>…</h3>';$('actionbar').style.display='none';$('q').value='';
@@ -663,14 +930,44 @@ function poll(force){
    if(j.done_list.includes(e.b)&&!e.pages){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
     const row=$('r'+i);if(row)row.outerHTML=rowHTML(e,i,true)}});
+  if(j.pool_ready!=null)$('poolpill').textContent=`identity pool ${j.pool_ready}/${j.pool_target}`;
   if(changed&&CUR)renderEps();
   if(!j.active&&tot){
    clearInterval(POLLT);POLLT=null;if(CUR)renderEps();statusHide();
-   const ready=(DL_BIDS||[]).filter(b=>EPS.find(e=>e.b===b&&e.pages));
-   DL_BIDS=[];
-   if(ready.length===1)clickA(`/ep/${ready[0]}.zip`);
-   else if(ready.length>1)clickA('/bundle.zip?bids='+ready.join(','))}
+   if((DL_BIDS||[]).length&&!STREAMED&&j.stream_url){STREAMED=true;clickA(j.stream_url)}
+   DL_BIDS=[];loadLib()}
  }).catch(()=>{})}
+async function poolTick(){
+ try{const r=await fetch('/api/pool');const j=await r.json();
+  let t=`identity pool ${j.ready}/${j.target}`;
+  if(j.ready<j.target)t+=` · refilling ${j.refilling} (ETA ~${Math.max(1,Math.round(j.eta_s/60))}m)`;
+  $('poolpill').textContent=t}catch(e){}}
+setInterval(poolTick,6000);poolTick();
+async function loadLib(){
+ const c=$('cache');
+ try{const r=await fetch('/api/library');const j=await r.json();
+  if(!j.series||!j.series.length){c.innerHTML='<h3>🗄 Cache on server</h3><p class=muted>ว่าง — default mode ส่ง zip เข้าเครื่องคุณตรงๆ ไม่เก็บไฟล์บน server (tick “cache” ตอนโหลดถ้าจะเก็บ)</p>';return}
+  let h=`<h3>🗄 Cache on server <span class=muted>(storage on server · total ${(j.total_mb||0).toFixed?j.total_mb:j.total_mb} MB · disk ${Math.round(j.disk_pct)}%)</span></h3>`;
+  j.series.forEach(s=>{
+   h+=`<div style="margin:12px 0 2px;font-weight:700">${esc(s.name)}
+    <button class=dbtn onclick=delSeries('${encodeURIComponent(s.name)}')>🗑 delete series</button></div>`;
+   s.eps.forEach(e=>{h+=`<div class=cep><img src='/page/${e.b}/page_001.jpg' onerror="this.style.opacity=.15">
+    <span class=no>${String(e.no??'').padStart(2,'0')}</span><span style=flex:1>${esc(e.slug)}</span>
+    <span class=muted>${e.pages}p · ${e.mb}MB${e.created?' · '+e.created:''}</span>
+    <a href=/ep/${e.b}>📖 read</a><a href='/ep/${e.b}.zip'>⬇ zip</a>
+    <button class=dbtn onclick=delEps('${e.b}')>🗑</button></div>`})});
+  h+='<div style="margin-top:14px" class=muted>TTL auto-purge: <select id=ttlsel><option value=0>off</option><option value=7>7 days</option><option value=30>30 days</option></select> disk max <input type=number id=dknum value=80 style=width:60px>% <button class=dbtn onclick=saveSet()>save settings</button></div>';
+  c.innerHTML=h;
+  const r2=await fetch('/api/settings',{method:'POST',body:JSON.stringify({op:'get'})});const s2=await r2.json();
+  if($('ttlsel'))$('ttlsel').value=(s2.ttl_days||0);if($('dknum'))$('dknum').value=(s2.disk_pct||80);
+ }catch(e){c.innerHTML=''}}
+async function saveSet(){
+ await fetch('/api/settings',{method:'POST',body:JSON.stringify({ttl_days:+$('ttlsel').value,disk_pct:+$('dknum').value})});
+ loadLib()}
+function delEps(b){if(!confirm('ลบตอนนี้จาก server cache?'))return;
+ fetch('/api/delete',{method:'POST',body:JSON.stringify({bids:[b]})}).then(loadLib)}
+function delSeries(n){if(!confirm('ลบทุกตอนของซีรีส์นี้จาก server cache?'))return;
+ fetch('/api/delete',{method:'POST',body:JSON.stringify({series:n})}).then(loadLib)}
 function rowHTML(e,i,fresh){
  return `<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
  <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
@@ -685,8 +982,31 @@ function statusShow(j){
  s.textContent=`⏬ ${pr.step||'…'} · ${pr.pct??''}${pr.eta_min!=null?('· ETA ~'+pr.eta_min+'m'):''}\\nworkers=${j.workers_now}/${j.max_workers||16} ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}`}
 function statusHide(){const s=$('status');if(s)s.style.display='none'}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
-poll();
+loadLib();poolTick();poll();
 </script></body></html>"""
+
+
+AUTH_USER = os.environ.get("AUTH_USER", "")
+AUTH_PASS = os.environ.get("AUTH_PASS", "")   # set via Coolify .env only
+
+
+def check_auth(handler):
+    """optional Basic Auth — enabled when both AUTH_USER/AUTH_PASS envs are set"""
+    if not (AUTH_USER and AUTH_PASS):
+        return True
+    h = handler.headers.get("Authorization") or ""
+    import base64 as _b64
+    try:
+        u, _, p = _b64.b64decode(h.split(None, 1)[1]).decode().partition(":")
+    except Exception:
+        u = p = ""
+    if not (u == AUTH_USER and p == AUTH_PASS):
+        handler.send_response(401)
+        handler.send_header("WWW-Authenticate", 'Basic realm="rididl"')
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return False
+    return True
 
 
 class H(BaseHTTPRequestHandler):
@@ -702,6 +1022,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_POST(self):
+        if not check_auth(self):
+            return
         ln = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(ln) if ln else b""
         try:
@@ -744,9 +1066,46 @@ class H(BaseHTTPRequestHandler):
                         "root": root_bid, "eps": out})
         elif p == "/api/download":
             bids = [str(x) for x in (data.get("bids") or [])]
+            cache = bool(data.get("cache"))
             missing = sorted({b for b in bids if not find_pages(b)}, key=int)
-            start_job(missing)
-            self._json({"started": True, "missing": missing})
+            job = start_job(missing, cache=cache)
+            self._json({"started": True, "missing": missing,
+                        "token": getattr(job, "stream_tok", "")})
+        elif p == "/api/library":
+            idx = lib_scan()
+            series = {}
+            for b, e in sorted(idx.items(), key=lambda kv: (kv[1].get("no") or 0)):
+                g = series.setdefault(e.get("series") or "?", [])
+                g.append({"b": b, "no": e.get("no"), "slug": e.get("slug"),
+                          "pages": e["pages"], "mb": round(e["bytes"] / 1048576, 1),
+                          "created": e.get("created")[:16] if e.get("created") else ""})
+            total = sum(x["mb"] for s in series.values() for x in s)
+            return self._json({
+                "series": [{"name": k, "eps": v} for k, v in series.items()],
+                "total_mb": round(total, 1),
+                "disk_pct": shutil.disk_usage(DATA_DIR).percent})
+        elif p == "/api/pool":
+            ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+            busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                        if time.time() - os.path.getmtime(f) < 240])
+            per = 75  # ~sec per identity build (measured median)
+            eta = ((POOL_TARGET - ready) * per) // max(busy, 1) if ready < POOL_TARGET else 0
+            return self._json({"ready": ready, "refilling": busy,
+                               "target": POOL_TARGET, "eta_s": eta})
+        elif p == "/api/settings":
+            if data.get("op") == "get":
+                return self._json(load_settings())
+            s = load_settings()
+            try:
+                s["ttl_days"] = int(data.get("ttl_days") or 0)
+                s["disk_pct"] = min(95, max(50, int(data.get("disk_pct") or 80)))
+                save_settings(s)
+            except Exception:
+                pass
+            return self._json({"ok": True, "settings": s})
+        elif p == "/api/delete":
+            n = delete_library(bids=data.get("bids"), series=data.get("series"))
+            self._json({"deleted": n})
         elif p == "/api/stop":
             j = JOB
             if j and j.alive:
@@ -763,7 +1122,31 @@ class H(BaseHTTPRequestHandler):
             self._json({}, 404)
 
     def do_GET(self):
+        if not check_auth(self):
+            return
         p = urllib.parse.urlparse(self.path).path
+        mst = re.match(r"^/dl/([0-9a-f]+)/(?P<n>.+\.zip)$", p)
+        if mst:
+            fp = os.path.join(DATA_DIR, "dl", mst.group(1))
+            cand = os.path.join(fp, os.path.basename(mst.group("n")))
+            data = open(cand, "rb").read() if os.path.exists(cand) else None
+            if not data:
+                return self._json({"error": "expired or unknown token"}, 404)
+            fn = urllib.parse.quote(os.path.basename(cand))
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", os.path.basename(cand))[:70]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{ascii_name}"; '
+                             f"filename*=UTF-8''{fn}")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)   # kept in result store (48h TTL sweep);
+                # re-click within window serves instantly
+            except Exception:
+                pass
+            return
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
         mr = re.match(r"^/ep/(\d+)/?$", p)
         if p.startswith("/api/job"):
@@ -778,7 +1161,11 @@ class H(BaseHTTPRequestHandler):
                         "max_workers": j.max_workers,
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "pending_n": pend + fail, "fail_n": fail,
-                        "progress": job_progress(j),
+                        "progress": job_progress(j), "cache": j.cache,
+                        "stream_url": j.stream_url,
+                        "pool_ready": len(glob.glob(
+                            os.path.join(POOL_DIR, "pool_*.json"))),
+                        "pool_target": POOL_TARGET,
                         "log": j.log[-8:], "done_list": done_list})
         elif mz:
             bid = mz.group(1)
@@ -859,14 +1246,20 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
         elif p.startswith("/page/"):
-            m3 = re.match(r"^/page/(\d+)/([\w.]+)$", p)
+            m3 = re.match(r"^/page/(\d+)/([\w.-]+)$", p)
             if not m3:
                 return self._json({}, 404)
             fp = None
-            for d in DL_DIRS:
-                c = os.path.join(APP_ROOT, d, m3.group(1), m3.group(2))
+            e = lib_index().get(m3.group(1))
+            if e:
+                c = os.path.join(e["path"], m3.group(2))
                 if os.path.exists(c):
-                    fp = c; break
+                    fp = c
+            if not fp:
+                for d in DL_DIRS:
+                    c = os.path.join(APP_ROOT, d, m3.group(1), m3.group(2))
+                    if os.path.exists(c):
+                        fp = c; break
             if not fp:
                 return self._json({}, 404)
             ct = "image/webp" if fp.endswith(".webp") else "image/jpeg"

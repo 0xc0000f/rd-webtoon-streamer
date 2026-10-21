@@ -14,6 +14,19 @@ _LAST_PW = [""]
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
 PROXY = os.environ.get("RIDI_PROXY")
+SEED = os.environ.get("PROXY_SEED", "")
+STAGGER = float(os.environ.get("STAGGER", "0") or 0)
+
+if PROXY and SEED:  # per-worker gateway session → distinct exit IP, no same-IP burst
+    parts = PROXY.split("@")
+    hostpart = parts[1]
+    user, _, pw = parts[0].rpartition(":")
+    user = f"{user}-session-{SEED}"
+    PROXY = f"http://{user}:{pw}@{hostpart}"
+
+if STAGGER:          # de-burst identity creation across prewarm lanes
+    import time as _t
+    _t.sleep(STAGGER)
 
 if PROXY:
     _orig_request = requests.Session.request
