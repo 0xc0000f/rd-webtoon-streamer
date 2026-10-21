@@ -208,9 +208,33 @@ SREQ.headers["User-Agent"] = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWeb
 SEARCH_API = "https://search-api.ridibooks.com/search"
 BOOK_API = "https://book-api.ridibooks.com/books/"
 
+_UPX = {"v": None}
+
+
+def _uproxies():
+    if _UPX["v"] is None:
+        p = os.environ.get("RIDI_PROXY")
+        _UPX["v"] = {"http": p, "https": p} if p else False
+    return _UPX["v"] or None
+
+
+def sget(url, timeout=25, **kw):
+    """direct first; CF-block/network error → retry via Databay proxy"""
+    try:
+        r = SREQ.get(url, timeout=timeout, **kw)
+        if r.status_code == 403 and _uproxies():
+            raise RuntimeError("cf-403")
+        return r
+    except Exception:
+        px = _uproxies()
+        if not px:
+            raise
+        kw.setdefault("proxies", px)
+        return SREQ.get(url, timeout=timeout, **kw)
+
 
 def search_titles(q):
-    r = SREQ.get(SEARCH_API, params={"keyword": q, "limit": 24}, timeout=25)
+    r = sget(SEARCH_API, params={"keyword": q, "limit": 24})
     books = list((r.json() or {}).get("books") or [])
     # grouped/series nodes may ride alongside flat entries: they carry
     # series_id + book_count + series_info instead of a single b_id
@@ -254,7 +278,7 @@ def search_titles(q):
 
 
 def book_meta(bid):
-    r = SREQ.get(BOOK_API + str(bid), timeout=25)
+    r = sget(BOOK_API + str(bid))
     return r.json()
 
 
@@ -375,20 +399,31 @@ def resolve(query):
     if not m:
         return []
     start = m.group(1)
-    root, volume = start, 0
+    root, expect = start, 0
+    ttl_title = ""
     try:
         j = book_meta(start)
         s = j.get("series") or {}
+        prop = s.get("property") or {}
         root = str(s.get("id") or start)
-        volume = int(s.get("volume") or 0)
+        expect = int(prop.get("total_book_count")
+                     or prop.get("opened_book_count")
+                     or s.get("volume") or 0)
+        ttl_title = prop.get("title") or ""
     except Exception:
         pass
     cf = os.path.join(CACHE_DIR, root + ".json")
     if os.path.exists(cf):
-        return json.load(open(cf))
+        cached = json.load(open(cf))
+        # never serve a truncated cache when we know the series is bigger
+        if len(cached) >= max(expect, 1):
+            return cached
+        os.remove(cf)
     ids = {root}
     frontier = [root]
-    while frontier and (not volume or len(ids) < volume):
+    guard = 0
+    while frontier and (guard < expect * 3 + 30):
+        guard += 1
         b = frontier.pop()
         try:
             nb = neighbors(book_meta(b))
@@ -398,7 +433,29 @@ def resolve(query):
             if n not in ids:
                 ids.add(n); frontier.append(n)
         time.sleep(0.12)
+        if expect and len(ids) >= expect:
+            break
     order = sorted(ids, key=int)
+    if expect > 2 and len(order) < expect:   # flaky upstream → one retry pass
+        ids |= set(order)
+        frontier = list(order)[::-1]
+        guard = 0
+        while frontier and guard < expect * 3 + 30:
+            guard += 1
+            b = frontier.pop()
+            try:
+                nb = neighbors(book_meta(b))
+            except Exception:
+                continue
+            for n in nb:
+                if n not in ids:
+                    ids.add(n); frontier.append(n)
+            time.sleep(0.12)
+            if len(ids) >= expect:
+                break
+        order = sorted(ids, key=int)
+    if expect > 2 and len(order) < expect:
+        return order                          # do NOT cache truncated result
     json.dump(order, open(cf, "w"))
     return order
 
