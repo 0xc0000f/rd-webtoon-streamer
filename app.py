@@ -115,6 +115,39 @@ def save_titles(t):
     json.dump(t, open(TITLES_CACHE, "w"))
 
 
+META_F = os.path.join(DATA_DIR, "series_meta.json")
+
+
+def load_meta():
+    try:
+        return json.load(open(META_F))
+    except Exception:
+        return {"root": {}, "title": {}, "no": {}}
+
+
+def save_meta(m):
+    json.dump(m, open(META_F, "w"))
+
+
+def sanitize(s, maxlen=60):
+    s = re.sub(r'[\\/:*?"<>|\r\n]+', "_", (s or "").strip())
+    return s[:maxlen].strip("_") or "untitled"
+
+
+def ep_label(bid):
+    """(nn, folder_name) for a downloaded ep: '01 · 프렛리스 원더!!_제1화 ...'"""
+    m = load_meta()
+    root = m["root"].get(bid)
+    series = (m.get("title") or {}).get(root) if root else None
+    name = (load_titles().get(bid) or "").strip() or ("ep_" + bid)
+    no = m["no"].get(bid)
+    head = f"{int(no):02d} " if no else ""
+    base = sanitize(f"{head}{name}")
+    if series and series != name:
+        return base, sanitize(f"{series}_{base}", 90)
+    return base, base
+
+
 def ep_title(bid, meta=None):
     t = load_titles().get(bid)
     if t:
@@ -339,48 +372,47 @@ PAGE = r"""<!doctype html><html lang=th><head><meta charset=utf-8>
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eee;
 font-family:'Noto Sans',system-ui,sans-serif}
 header{display:flex;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);
-position:sticky;top:0;background:rgba(16,16,20,.94);backdrop-filter:blur(6px);z-index:5;flex-wrap:wrap}
+position:sticky;top:0;background:rgba(16,16,20,.95);backdrop-filter:blur(6px);z-index:5;flex-wrap:wrap}
 .logo{font-weight:800;font-size:18px;color:var(--pink)}
-input[type=text]{flex:1;min-width:220px;background:var(--card);border:1px solid var(--line);color:#eee;
+input[type=text]{flex:1;min-width:200px;background:var(--card);border:1px solid var(--line);color:#eee;
 padding:11px 14px;border-radius:10px;font-size:14px}
 button{background:linear-gradient(135deg,#ff4081,#d81b60);color:#fff;border:0;
 padding:11px 18px;border-radius:10px;font-weight:700;cursor:pointer}
 button.gray{background:#333;border:1px solid #444}
-main{max-width:1000px;margin:0 auto;padding:20px}
-.pill{font-size:11px;padding:3px 8px;border-radius:99px;background:#26262f;color:#9cf;margin-left:6px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:16px}
+main{max-width:900px;margin:0 auto;padding:18px 16px 130px}
+.pill{font-size:11px;padding:3px 8px;border-radius:99px;background:#26262f;color:#9cf;margin-left:auto}
+#pbar{position:fixed;top:0;left:0;height:3px;background:var(--pink);width:0%;z-index:9;transition:width .6s;display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-top:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s}
 .card:hover{transform:translateY(-2px);border-color:var(--pink)}
 .card img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#222}
-.card b{display:block;font-size:13px;padding:8px 10px 2px;height:36px;overflow:hidden}
+.card b{display:block;font-size:13px;padding:8px 10px 2px;line-height:1.35}
 .card span{display:block;font-size:11px;color:#888;padding:0 10px 10px}
-.bar{height:7px;background:#26262f;border-radius:5px;overflow:hidden;margin:8px 0 2px}
-.bar>i{display:block;height:100%;background:var(--pink);width:0%}
-#log{position:fixed;right:16px;left:16px;bottom:74px;background:#0b0b0f;border:1px solid var(--line);
-border-radius:10px;padding:10px;font-family:monospace;font-size:12px;height:120px;
-overflow-y:auto;white-space:pre-wrap;color:#9fe;z-index:6}
-.row{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
-.eprow{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);
-padding:9px 4px;font-size:14px;align-items:center}
-.eprow a{color:#9cf;text-decoration:none;font-size:13px}
-.sel{accent-color:var(--pink)}
-.back{color:#888;cursor:pointer;font-size:13px}
-h3{margin:18px 0 6px}.muted{color:#888;font-size:12px}
-.tag19{color:#ff6a81;font-weight:700}
-footer{position:fixed;left:16px;right:16px;bottom:8px;display:flex;gap:8px;z-index:7}
+.serieshead{display:flex;gap:14px;background:var(--card);border:1px solid var(--line);
+border-radius:14px;padding:14px;margin:14px 0;align-items:center}
+.serieshead img{width:96px;border-radius:10px;flex:none}
+.eprow{display:flex;gap:10px;align-items:center;border-bottom:1px solid var(--line);
+padding:10px 6px;font-size:14px}
+.no{color:#ff9db5;font-weight:700;min-width:30px;text-align:right;font-variant-numeric:tabular-nums}
+.eprow a{color:#9cf;text-decoration:none;font-size:13px;white-space:nowrap}
+.eprow .ok{color:#7bd88f;font-size:12px}
+.sel{accent-color:var(--pink);width:16px;height:16px}
+.back{color:#888;cursor:pointer;font-size:13px;display:inline-block;margin-top:4px}
+h3{margin:14px 0 8px}.muted{color:#888;font-size:12px}.tag19{color:#ff6a81;font-weight:700}
+#actionbar{position:fixed;left:0;right:0;bottom:0;background:#101014ee;border-top:1px solid var(--line);
+backdrop-filter:blur(6px);z-index:8;display:none;padding:10px 16px;
+display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+#status{font-family:monospace;font-size:12px;color:#9fe;background:#0b0b0f;border:1px solid var(--line);
+border-radius:10px;padding:8px 12px;margin:10px auto;max-width:900px;display:none;white-space:pre-wrap}
 </style></head><body>
+<div id=pbar></div>
 <header><div class=logo>📕 RIDI Webtoon DL</div>
-<input id=q type=text placeholder="พิมพ์ชื่อเรื่อง (เช่น 프렛리스) หรือวาง URL/รหัสตอน">
-<button onclick=search()>ค้นหา</button>
-<span class=pill id=wlab>workers —</span></header>
+<input id=q type=text placeholder="พิมพ์ชื่อเรื่อง หรือวาง URL/รหัสตอน">
+<button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span></header>
 <main id=out></main>
-<div id=log style=display:none></div>
-<footer><button onclick=dlSelected()>⬇ DOWNLOAD SELECTED</button>
-<button class=gray onclick=selAll(1)>SELECT ALL</button>
-<button class=gray onclick=selAll(0)>CLEAR</button>
-<button class=gray onclick=backHome()>🏠 HOME</button></footer>
+<div id=actionbar></div>
 <script>
-let VIEW='search',SERIES=[],EPS=[],SEL=new Set(),CUR=null;
+let SERIES=[],EPS=[],SEL=new Set(),CUR=null,POLLT=null;
 const $=id=>document.getElementById(id);
 function esc(s){return (s+'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp'}[c]))}
 async function search(){
@@ -388,60 +420,76 @@ async function search(){
  if(/https?:|\d{6,}/.test(q)&&/[/.]|\b\d{8,}\b/.test(q)){openByQuery(q);return}
  $('out').innerHTML='<h3>กำลังค้นหา…</h3>';
  const r=await fetch('/api/search',{method:'POST',body:JSON.stringify({q})});const j=await r.json();
- SERIES=j.titles||[];VIEW='grid';renderGrid(j.q||q)}
+ SERIES=j.titles||[];renderGrid(j.q||q)}
 function renderGrid(q){
- let h=`<h3>ผลการค้นหา “${esc(q)}” <span class=muted>${SERIES.length} เรื่อง</span></h3><div class=grid>`;
+ let h=`<h3>เลือกเรื่อง “${esc(q)}” <span class=muted>${SERIES.length} เรื่อง</span></h3><div class=grid>`;
  SERIES.forEach(t=>{
   h+=`<div class=card onclick=openTitle('${t.sid}')><img loading=lazy src='${t.cover}' onerror="this.style.opacity=.2">
-   <b>${esc(t.title)}</b><span>${esc(t.author||'')}${t.adult?' <span class=tag19>19+</span>':''}</span></div>`});
- $('out').innerHTML=h+'</div>'+(SERIES.length?'':'<p class=muted>ไม่เจอเรื่องนี้ — ลองพิมพ์ชื่อภาษาเกาหลี หรือวาง URL ของตอน</p>')}
-async function openByQuery(q){$('out').innerHTML='<h3>…</h3>';
+   <b>${esc(t.title)}</b><span>${t.count} eps ${t.adult?'· <span class=tag19>19+</span>':''}</span></div>`});
+ $('out').innerHTML=h+'</div>'+(SERIES.length?'':'<p class=muted>ไม่เจอ — ลองพิมพ์ชื่อภาษาเกาหลี หรือวาง URL ของตอน</p>');
+ $('actionbar').style.display='none'}
+async function openByQuery(q){$('out').innerHTML='<h3>โหลดรายการตอน…</h3>';
  const r=await fetch('/api/fetch',{method:'POST',body:JSON.stringify({q})});const j=await r.json();
- if(j.error)return $('out').innerHTML='<p class=muted>'+esc(j.error)+'</p>';EPS=j.eps;CUR=j;j_=j;
- VIEW='eps';SEL=new Set();renderEps()}
-function openTitle(sid){
- $('q').value=sid;openByQuery(sid)}
+ if(j.error)return $('out').innerHTML='<p class=muted>'+esc(j.error)+'</p>';EPS=j.eps;CUR=j;
+ SEL=new Set();renderEps()}
+function openTitle(sid){openByQuery(sid)}
 function renderEps(){
- let h=`<div class=back onclick=backHome()>‹ home</div>
- <h3 style="margin-top:6px">${esc(CUR.title||'')}</h3>`;
- if(CUR.cover)h+=`<img src='${CUR.cover}' style='width:110px;border-radius:8px'>`;
- h+=`<div class=row><span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div><div id=eplist>`;
- EPS.forEach((e,i)=>{h+=`<div class=eprow><label><input type=checkbox class=sel data-b='${e.b}'
-  ${(e.pages?'disabled':'')} onchange=tog(this)> ${esc(e.t)}</label>`+
-  (e.pages?`<span><a href='/ep/${e.b}'>read · ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`
-   :`<span class=muted>—</span>`)+'</div>'});
- $('out').innerHTML=h+'</div>'}
-function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b)}
-function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)})}
+ let h=`<div class=back onclick=home()>‹ เปลี่ยนเรื่อง</div>
+ <div class=serieshead><img src='${CUR.cover||''}' onerror="this.style.opacity=.15">
+ <div><h3 style=margin:0>${esc(CUR.title||'')}</h3>
+ <span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div></div>`;
+ EPS.forEach((e,i)=>{h+=`<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
+  <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
+  <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1>${esc(e.t)}</span></label>`+
+  (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`
+   :'<span class=muted>—</span>')+'</div>'});
+ $('out').innerHTML=h;
+ const bar=$('actionbar');
+ const nDL=EPS.filter(e=>!e.pages).length, nDone=EPS.filter(e=>e.pages).length;
+ let b=`<button onclick=dlSelected()>⬇ โหลดตอนที่เลือก (${SEL.size})</button>`;
+ if(nDL)b+=`<button class=gray onclick=selAll(1)>เลือกทั้งหมด</button><button class=gray onclick=selAll(0)>เคลียร์</button>`;
+ if(nDone)b+=`<button class=gray onclick=bundleZip()>📦 zip ไฟล์ที่โหลดแล้ว</button>`;
+ bar.innerHTML=b;bar.style.display='flex'}
+function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b);
+ const btn=document.querySelector('#actionbar button');if(btn)btn.textContent=`⬇ โหลดตอนที่เลือก (${SEL.size})`}
+function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)});renderEps()}
 async function dlSelected(){
  const missing=[...SEL].filter(b=>!EPS.find(e=>e.b===b&&e.pages));
- if(!missing.length)return alert('เลือกตอนที่ยังไม่ได้โหลด');
+ if(!missing.length)return alert('เลือกตอนที่ยังไม่ได้โหลดก่อน');
  const r=await fetch('/api/download',{method:'POST',body:JSON.stringify({bids:missing})});const j=await r.json();
- log('started '+j.missing.length+' eps');poll()}
-let timer=setInterval(poll,5000);
-async function poll(){const r=await fetch('/api/job');if(!r.ok)return;const j=await r.json();
- if(j.active||j.finished){
+ status('🚀 เริ่มโหลด '+j.missing.length+' ตอน — progress จะขึ้นบนหัวเว็บ\n');poll(true)}
+function bundleZip(){const done=EPS.filter(e=>e.pages).map(e=>e.b);location.href='/bundle.zip?bids='+done.join(',')}
+function home(){$('out').innerHTML='<h3>…</h3>';$('actionbar').style.display='none';$('q').value='';
+ clearInterval(POLLT);POLLT=null;$('pbar').style.display='none';$('wlab').textContent='idle'}
+function status(t){const s=$('status')||null}
+function poll(force){
+ if(POLLT&&!force)return; if(!POLLT)POLLT=setInterval(()=>poll(),4000);
+ fetch('/api/job').then(r=>r.json()).then(j=>{
   const tot=j.done_n+j.pending_n;
-  document.getElementById('wlab').textContent=`workers ${j.workers_now}/${j.workers_target} · done ${j.done_n}/${tot}`;
- }
- if(!j.active)return;
- const tot=j.done_n+j.pending_n;
- let s=`workers=${j.workers_now}/${j.workers_target} | ✅${j.done_n} ⏳${j.pending_n-failAdj(j)} ❌${j.fail_n}`;
- function failAdj(){return 0}
- log(s+'\n'+(j.log.slice(-3).join('\n')));
- EPS.forEach((e,i)=>{
-  if(j.done_list.includes(e.b)&&!e.pages){
-   e.pages=(j.pages||{})[e.b]||1;
-   const row=document.querySelectorAll('.eprow')[i];
-   if(row&&CUR&&EPS[i])row.lastElementChild.innerHTML=
-    `<span><a href='/ep/${e.b}'>read · ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`;}});
- SEL=new Set([...SEL].filter(b=>{const e=EPS.find(x=>x.b===b);return e&&!e.pages}));
- if(j.finished)log('✔ ALL DONE — กด zip/read ในรายการได้เลย')}
-async function stopJob(){}
-function backHome(){$('out').innerHTML='';$('q').value='';VIEW='search'}
-function log(t){const l=$('log');l.style.display='';
- l.textContent=(t+'\n'+l.textContent).split('\n').slice(0,60).join('\n')}
-document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+  $('wlab').textContent=(j.active||tot)?`workers ${j.workers_now}/${j.workers_target} · ✅${j.done_n}/${tot}`:'idle';
+  const pb=$('pbar');pb.style.display=tot?'block':'none';pb.style.width=(tot?Math.round(j.done_n*100/tot):100)+'%';
+  let changed=false;
+  (j.log&&j.log.length)&&statusShow(j);
+  EPS.forEach((e,i)=>{
+   if(j.done_list.includes(e.b)&&!e.pages){
+    e.pages=(j.pages||{})[e.b]||1;changed=true;
+    const row=$('r'+i);if(row)row.outerHTML=rowHTML(e,i,true)}});
+  if(changed&&CUR)renderEps();
+  if(!j.active&&tot){clearInterval(POLLT);POLLT=null;if(CUR)renderEps()}
+ }).catch(()=>{})}
+function rowHTML(e,i,fresh){
+ return `<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
+ <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
+ <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1>${esc(e.t)}</span></label>`+
+ (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`
+  :'<span class=muted>⏳</span>')+'</div>'}
+function statusShow(j){
+ let s=$('status');
+ if(!s){s=document.createElement('pre');s.id='status';$('out').before(s)}
+ s.style.display='block';
+ s.textContent=`workers=${j.workers_now}/${j.workers_target}  ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}\n`+(j.log.slice(-4).join('\n'))}
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+poll();
 </script></body></html>"""
 
 
@@ -479,6 +527,17 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": "ไม่พบรหัสเรื่องจาก input"}, 400)
             root_bid = min(eps, key=int)
             info = series_overview(root_bid, eps)
+            try:
+                m = load_meta()
+                (m.setdefault("root", {}))[root_bid] = ""
+                for i, b in enumerate(sorted(eps, key=int)):
+                    m["root"][b] = root_bid
+                    m["no"][b] = i + 1
+                if info.get("title"):
+                    m.setdefault("title", {})[root_bid] = info["title"]
+                save_meta(m)
+            except Exception:
+                pass
             out = []
             for b in eps:
                 pg = find_pages(b)
@@ -509,7 +568,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path
-        m2 = re.match(r"^/(ep|zip)/(\d+)(\.zip)?$", p)
+        mz = re.match(r"^/ep/(\d+)\.zip$", p)
+        mr = re.match(r"^/ep/(\d+)/?$", p)
         if p.startswith("/api/job"):
             j = JOB
             if not j:
@@ -522,32 +582,80 @@ class H(BaseHTTPRequestHandler):
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "pending_n": pend + fail, "fail_n": fail,
                         "log": j.log[-8:], "done_list": done_list})
-        elif m2:
-            bid, zipped = m2.group(2), bool(m2.group(3))
+        elif mz:
+            bid = mz.group(1)
             pages = find_pages(bid)
             if not pages:
                 b = "not downloaded yet".encode()
                 self.send_response(404); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
-            if zipped:
-                zp = os.path.join(APP_ROOT, "zips"); os.makedirs(zp, exist_ok=True)
-                zf = os.path.join(zp, bid + ".zip")
-                with zipfile.ZipFile(zf, "w") as z:
+            name, folder = ep_label(bid)
+            slug = re.sub(r"[^A-Za-z0-9가-힣ㄱ-ㅎㅏ-ㅣ._ -]", "", folder)[:80].strip() or ("EP" + bid)
+            fn = urllib.parse.quote(slug + ".zip")
+            zp = os.path.join(DATA_DIR, "zips"); os.makedirs(zp, exist_ok=True)
+            zf = os.path.join(zp, fn[:60] + "_" + bid + ".zip")
+            with zipfile.ZipFile(zf, "w") as z:
+                for f in pages:
+                    z.write(f, arcname=f"{folder}/{os.path.basename(f)}")
+            data = open(zf, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{slug}.zip"; filename*=UTF-8\'\'{fn}')
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+            return
+        elif p == "/bundle.zip":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            bids = [b for b in (qs.get("bids") or [""])[0].split(",") if b.isdigit()]
+            parts = []
+            zfpath = None
+            import io
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                any_ = False
+                for b in bids:
+                    pages = find_pages(b)
+                    if not pages:
+                        continue
+                    any_ = True
+                    _, folder = ep_label(b)
                     for f in pages:
-                        z.write(f, arcname=os.path.basename(f))
-                data = open(zf, "rb").read()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/zip")
-                self.send_header("Content-Disposition", f'attachment; filename="{bid}.zip"')
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers(); self.wfile.write(data)
-                return
-            title = html.escape(load_titles().get(bid) or "")
+                        z.write(f, arcname=f"{folder}/{os.path.basename(f)}")
+            if not any_:
+                return self._json({"error": "nothing downloaded"}, 404)
+            data = buf.getvalue()
+            slug = sanitize((load_meta()["title"].get(
+                load_meta()["root"].get(bids[0], ""), "") or "export"), 60) + "_selected"
+            fn = urllib.parse.quote(slug + ".zip")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{slug}.zip"; filename*=UTF-8\'\'{fn}')
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        elif mr:
+            bid = mr.group(1)
+            pages = find_pages(bid)
+            if not pages:
+                b = "not downloaded yet".encode()
+                self.send_response(404); self.send_header("Content-Length", str(len(b)))
+                self.send_header("Content-Type", "text/plain; charset=utf-8"); self.end_headers()
+                self.wfile.write(b); return
+            no, folder = ep_label(bid)
+            m = load_meta()
+            series = m["title"].get(m["root"].get(bid, ""), "")
+            head = html.escape(f"{no} · {folder}") if no else html.escape(folder)
+            sub = html.escape(series or "")
             imgs = "".join(
                 f"<img loading=lazy src=/page/{bid}/{os.path.basename(f)}>" for f in pages)
-            css = ("body{background:#000;margin:0}img{display:block;width:min(100vw,900px);margin:0 auto}"
-                   "a{color:#9cf;font-family:sans-serif;padding:12px;display:inline-block}")
-            b = (f"<html><style>{css}</style><a href='/'>← back</a>"
-                 f"<h3 style='font-family:sans-serif;color:#eee'>{title}</h3>" + imgs + "</html>").encode()
+            css = ("body{background:#0b0b0f;margin:0;color:#ddd;font-family:sans-serif}"
+                   ".top{position:sticky;top:0;background:#0b0b0fee;padding:10px 14px;"
+                   "border-bottom:1px solid #272733;display:flex;gap:10px;align-items:baseline;z-index:3}"
+                   ".n{font-size:15px;font-weight:700}.s{color:#888;font-size:12px}"
+                   "img{display:block;width:min(100vw,820px);margin:6px auto;border-radius:4px}")
+            b = (f"<html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                 f"<style>{css}</style></head><body>"
+                 f"<div class=top><a href='/' style=color:#9cf>←</a>"
+                 f"<span class=n>EP {head}</span>{('<span class=s>'+sub+'</span>') if sub else ''}</div>" + imgs +
+                 "</body></html>").encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
         elif p.startswith("/page/"):

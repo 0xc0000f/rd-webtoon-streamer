@@ -191,6 +191,9 @@ def page_key(b):
     s = "stream" + b[:max(len(b)-6, 0)] + b
     return hashlib.sha1(s.encode()).hexdigest()[:16].encode()
 
+PAGE_WORKERS = int(os.environ.get("PAGE_WORKERS") or 8)
+
+
 def app_download(w, bids, outroot=None, dev=None):
     outroot = outroot or f"{R}/dl_farm"
     leak = w.get("https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
@@ -216,17 +219,23 @@ def app_download(w, bids, outroot=None, dev=None):
         imgs = (meta.json().get("content_images") or [])
         outdir = os.path.join(outroot, bid); os.makedirs(outdir, exist_ok=True)
         k = page_key(bid); n = 0; f = 0
-        for i in range(len(imgs)):
+
+        def _fetch(i):
             t = "cover" if i == 0 else "content"
             u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
                  f"?page_num={i}&type={t}&quality=recommended&device_id={dev}")
-            r2 = a.get(u, timeout=60)
-            if r2.status_code != 200 or len(r2.content) < 300:
-                f += 1; time.sleep(0.3); continue
-            d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
-            pt = d.update(r2.content) + d.finalize()
-            ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
-            open(os.path.join(outdir, f"{i:03d}{ext}"), "wb").write(pt); n += 1
+            rr = a.get(u, timeout=90)
+            return i, rr
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(PAGE_WORKERS) as pool:
+            for i, r2 in pool.map(_fetch, range(len(imgs))):
+                if r2.status_code != 200 or len(r2.content) < 300:
+                    f += 1; continue
+                d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
+                pt = d.update(r2.content) + d.finalize()
+                ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
+                open(os.path.join(outdir, f"{i:03d}{ext}"), "wb").write(pt); n += 1
         print(f"  ✔ {bid}: {n}/{len(imgs)} pages")
         got.append({"b_id": bid, "pages": n})
     return got
