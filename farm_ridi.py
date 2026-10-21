@@ -33,12 +33,68 @@ def jprint(tag, r):
     print(f"[{tag}] {r.status_code} {str(r.text[:120]).replace(chr(10),' ')}")
 
 # ---------- temp mail ----------
+_MT_HDR = {"User-Agent": WEB_UA}
+
+def _mtm_new():
+    """fallback provider mail.tm → (addr, 'mtm:<jwt>')"""
+    d = requests.get("https://api.mail.tm/domains", headers=_MT_HDR, timeout=30).json()
+    dom = d["hydra:member"][0]["domain"]
+    addr = "rw" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10)) \
+        + "@" + dom
+    pw = "RidiMail" + random.choice(string.ascii_letters) + "!9x"
+    requests.post("https://api.mail.tm/accounts", headers={**_MT_HDR,
+                  "Content-Type": "application/json"},
+                  json={"address": addr, "password": pw}, timeout=30)
+    tok = requests.post("https://api.mail.tm/token", headers={**_MT_HDR,
+                        "Content-Type": "application/json"},
+                        json={"address": addr, "password": pw}, timeout=30).json()["token"]
+    return addr, "mtm:" + tok
+
 def tmail_new():
-    a = requests.get("https://api.tempmail.lol/generate",
-                     headers={"User-Agent": WEB_UA}, timeout=30).json()
-    return a["address"], a["token"]
+    last = None
+    for att in range(2):
+        try:
+            r = requests.get("https://api.tempmail.lol/generate",
+                             headers={"User-Agent": WEB_UA},
+                             timeout=30 if not att else 45)
+            a = r.json()
+            return a["address"], a["token"]
+        except Exception as e:
+            last = e
+            print("  [tmail gen retry]", str(e)[:80]); time.sleep(3 * (att + 1))
+    try:                      # primary provider rate-limited → mail.tm
+        return _mtm_new()
+    except Exception as e:
+        print("  [mail.tm fallback failed]", str(e)[:90])
+        raise last
+
+def _mtm_poll(token, want_otp=False):
+    h = {**_MT_HDR, "Authorization": "Bearer " + token[4:]}
+    ms = []
+    for _t in range(6):
+        try:
+            j = requests.get("https://api.mail.tm/messages", headers=h,
+                             timeout=30).json()
+            ms = j.get("hydra:member") or []
+            break
+        except Exception as e:
+            print("  [mtm poll retry]", str(e)[:80]); time.sleep(20)
+    if not ms:
+        return None
+    mid = max(ms, key=lambda x: x.get("createdAt") or "")["id"]
+    full = requests.get(f"https://api.mail.tm/messages/{mid}", headers=h,
+                        timeout=30).json()
+    body = (full.get("text") or "") + (full.get("html") or "")
+    dec = quopri.decodestring(body.encode()).decode("utf-8", "ignore")
+    if want_otp:
+        cs = re.findall(r"\b\d{6}\b", re.sub("<[^>]+>", " ", dec))
+        return ("otp", cs[0]) if cs else None
+    fs = re.findall(r'href="(https?://[^"]+verify[^"]*)"', dec)
+    return ("link", fs[0].replace("&amp;", "&")) if fs else None
 
 def tmail_poll(token, want_otp=False):
+    if token.startswith("mtm:"):
+        return _mtm_poll(token, want_otp)
     for _t in range(5):
         try:
             r = requests.get(f"https://api.tempmail.lol/auth/{token}",

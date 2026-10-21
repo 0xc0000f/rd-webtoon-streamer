@@ -10,6 +10,7 @@ def STEP(msg):
 
 
 _T0 = time.time()
+_LAST_PW = [""]
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
 PROXY = os.environ.get("RIDI_PROXY")
@@ -30,6 +31,8 @@ import farm_ridi as F
 R = "/tmp/opencode/ridi"
 STATE_F, OUTROOT = sys.argv[1], sys.argv[2]
 TARGETS = [t for t in sys.argv[3:] if len(t) >= 8]
+POOL_DIR = os.environ.get("POOL_DIR", "")
+REUSE_ACCT = os.environ.get("REUSE_ACCT", "")
 
 st_path = STATE_F
 
@@ -42,8 +45,38 @@ def save(st):
     json.dump(st, open(st_path, "w"))
 
 
+def _persist_pool(w, uid, pw, addr, tok):
+    p = os.path.join(POOL_DIR, f"pool_{int(time.time()*1000)}.json")
+    tmp = p + ".tmp"
+    json.dump({"uid": uid, "pw": pw, "addr": addr, "tmail_tok": tok,
+               "cookies": w.cookies.get_dict()}, open(tmp, "w"))
+    os.rename(tmp, p)
+    print(f"[pool] saved {p}", flush=True)
+
+
 def build_account(remaining):
     """one throwaway account; returns (claims, session, dev, uid, addr) or None"""
+    if REUSE_ACCT:
+        STEP("reusing pooled account")
+        try:
+            j = json.load(open(REUSE_ACCT))
+        except Exception as e:
+            print("    pool read err:", str(e)[:80]); return None
+        F.TMAIL_TOKEN[0] = j["tmail_tok"]
+        uid, pw, addr, tok = j["uid"], j["pw"], j["addr"], j["tmail_tok"]
+        wck = F.full_login(uid, pw)
+        if not wck:
+            print("    pooled login failed"); return None
+        w = requests.Session()
+        w.cookies.update(wck)
+        w.headers["User-Agent"] = F.WEB_UA
+        if not F.verify_adult(w):
+            print("    adult verify failed (continuing)")
+        claimed = []
+        for c in dict.fromkeys(F.route_claims(w, remaining)):
+            if c not in claimed:
+                claimed.append(c)
+        return claimed, w, str(uuid.uuid4()), uid, addr
     STEP("making new email")
     addr, tok = F.tmail_new()
     F.TMAIL_TOKEN[0] = tok
@@ -53,6 +86,7 @@ def build_account(remaining):
         try:
             uid, pw, ck0 = F.signup(addr)
             if uid:
+                _LAST_PW[0] = pw
                 break
         except Exception as e:
             print(f"    signup err {str(e)[:80]}")
@@ -96,24 +130,60 @@ def build_account(remaining):
 
 
 def main():
+    import signal
+
+    class StageTO(Exception):
+        pass
+
+    def _alarm(sig, fr):
+        raise StageTO()
+
+    signal.signal(signal.SIGALRM, _alarm)
+
     st = {"done": {}, "accounts": []}
     if os.path.exists(st_path):
         try:
             st = json.load(open(st_path))
         except Exception:
             pass
+
+    if os.environ.get("PREWARM") and POOL_DIR:  # identity-only run → pool file
+        print(f"[w{os.getpid()%10000}] prewarm account", flush=True)
+        try:
+            res = build_account([])
+        except Exception as e:
+            print("    err:", str(e)[:120], flush=True); res = None
+        if res:
+            claimed, w, dev, uid, acc_addr = res
+            _persist_pool(w, uid, _LAST_PW[0] or "", acc_addr, F.TMAIL_TOKEN[0])
+        return
+
     remaining = [b for b in TARGETS if b not in st["done"]]
     t0 = time.time()
     first_page_at = None
+    id_fail = 0
     for i in range(6):  # up to 6 attempts with fresh identities
         if not remaining:
             break
         print(f"[w{os.getpid() % 10000}] account #{i+1} | left={len(remaining)}", flush=True)
+        signal.alarm(int(os.environ.get("STAGE_TIMEOUT", "90")))  # hard cap/identity
         try:
             res = build_account(remaining)
+        except StageTO:
+            print("    stage timeout (hard) — recycle identity", flush=True)
+            res = None
         except Exception as e:
             print("    err:", str(e)[:120], flush=True)
             res = None
+        finally:
+            signal.alarm(0)
+        if res is None:
+            id_fail += 1
+            if id_fail >= 3:      # provider/proxy likely down → cool off
+                print("    cooling 45s (mail/prox circuit)", flush=True)
+                time.sleep(45)
+        else:
+            id_fail = 0
         if not res:
             continue
         claimed, w, dev, uid, acc_addr = res

@@ -254,6 +254,7 @@ class Job:
         self.pending = list(self.all)
         self.done = {}
         self.failed = []
+        self.tries = {}
         self.log = []
         self.lock = threading.Lock()
         self.lanes = []
@@ -271,15 +272,80 @@ class Job:
 JOB = None
 LANE_IDX = [0]
 
+# ---- prewarmed identity pool: ready accounts so downloads skip email/signup ----
+POOL_DIR = os.path.join(DATA_DIR, "pool")
+POOL_TARGET = int(os.environ.get("POOL_TARGET", "2"))
+
+
+def take_pool():
+    """atomically consume one prewarmed account file (None if empty)"""
+    try:
+        fs = sorted(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+        if not fs:
+            return None
+        dst = fs[0].replace("pool_", "inuse_")
+        os.rename(fs[0], dst)
+        return dst
+    except Exception:
+        return None
+
+
+def spawn_pre(delay=0):
+    def _w():
+        time.sleep(delay)
+        while len(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))) < POOL_TARGET \
+                and len(glob.glob(os.path.join(POOL_DIR, "*.busy"))) < 2:
+            try:
+                os.makedirs(POOL_DIR, exist_ok=True)
+                busy = os.path.join(POOL_DIR,
+                                    f"pre_{int(time.time()*1000)}.busy")
+                open(busy, "w").close()
+                env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR)
+                subprocess.Popen(
+                    [sys.executable, WORKER,
+                     os.path.join(DATA_DIR, "pre.state.json"), DATA_DIR],
+                    stdout=open(os.path.join(POOL_DIR, "pre.log"), "ab"),
+                    stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
+                # one at a time; loop revisits every cycle
+                break
+            except Exception:
+                return
+
+    threading.Thread(target=_w, daemon=True).start()
+
+
+def prewarm_loop():
+    while True:
+        if True:
+            n = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+            b = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                     if time.time() - os.path.getmtime(f) < 240])
+            if n < POOL_TARGET and b == 0:
+                spawn_pre()
+            for f in glob.glob(os.path.join(POOL_DIR, "*.busy")):
+                if time.time() - os.path.getmtime(f) > 300:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+        time.sleep(20)
+
+
+threading.Thread(target=prewarm_loop, daemon=True).start()
+
 
 def job_progress(j):
     """live step / percent / eta from lane logs + decrypted file counts"""
     try:
         files, steps, ppe_vals = 0, [], []
+        acc_n = None
         for l in j.lanes:
             try:
                 tail = open(os.path.join(l["outroot"], "lane.log"), "rb").read()[-1200:]
                 for line in tail.decode(errors="ignore").splitlines():
+                    macc = re.search(r"account #(\d+)", line)
+                    if macc:
+                        acc_n = max(acc_n or 1, int(macc.group(1)))
                     if line.startswith("STEP"):
                         steps.append(line.strip())
             except Exception:
@@ -310,7 +376,10 @@ def job_progress(j):
             eta_min = round(max(0.3, (est_total - files) / max(rate, .01)) / 60)
         j._prog_prev = (files, now)
         step = steps[-1] if steps else ("downloading pages" if files else "preparing")
-        return {"step": step.replace("STEP ", "", 1), "pct": pct,
+        step = step.replace("STEP ", "", 1)
+        if acc_n and acc_n > 1:
+            step = f"retrying (attempt {acc_n}/6) · {step}"
+        return {"step": step, "pct": pct,
                 "eta_min": eta_min, "pages_now": files}
     except Exception:
         return {}
@@ -321,8 +390,23 @@ def lane_run(job, lane):
     sf = lane["statefile"]; out = lane["outroot"]; bids = lane["bids"]
     try:
         logtail = os.path.join(out, "lane.log")
+        last_sz = -1; stall_t = time.time(); born = time.time()
         while p.poll() is None:
             time.sleep(4)
+            try:
+                sz = os.path.getsize(logtail)
+                if sz != last_sz:
+                    last_sz = sz; stall_t = time.time()
+            except OSError:
+                pass
+            # hard watchdog: stalled output >150s → kill so bids get requeued
+            if time.time() - stall_t > 150 and time.time() - born > 60:
+                job.logf(f"lane stalled >150s → kill + respawn")
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                break
         st = {}
         try:
             st = json.load(open(sf))
@@ -333,7 +417,10 @@ def lane_run(job, lane):
         with job.lock:
             job.done.update(got)
             miss = [b for b in bids if str(b) not in got]
-            job.failed += miss
+            for b in miss:
+                job.tries[b] += 1
+            job.failed = [b for b in dict.fromkeys(job.failed + miss)
+                          if job.tries.get(b, 0) >= 2 and str(b) not in job.done]
             frac = len(got) / max(len(bids), 1)
             job.history.append(True if frac >= 0.9 else False)
             # titles of finished eps become linkable immediately
@@ -399,6 +486,11 @@ def aimd_supervisor(job):
             sf = os.path.join(DATA_DIR, f"w{idx:02d}.state.json")
             json.dump({"done": {}, "accounts": []}, open(sf, "w"))
             env = dict(os.environ)
+            pool_file = take_pool()          # reuse prewarmed identity if any
+            if pool_file:
+                env["REUSE_ACCT"] = pool_file
+                job.logf(f"pooled account → instant start ({os.path.basename(pool_file)})")
+            spawn_pre(0)                     # keep the pool topped up
             pr = subprocess.Popen([sys.executable, WORKER, sf, out] + bids,
                                   stdout=open(os.path.join(out, "lane.log"), "ab"),
                                   stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
