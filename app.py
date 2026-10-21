@@ -752,6 +752,7 @@ def aimd_supervisor(job):
             threading.Thread(target=lane_run, args=(job, lane), daemon=True).start()
             i += 1
         time.sleep(4)
+        need_pkg = False
         with job.lock:
             if not job.pending and len(job.lanes) == 0:
                 job.alive = False
@@ -770,15 +771,20 @@ def aimd_supervisor(job):
                 if dirty:
                     save_titles(titles)
                 job.logf("ALL DONE")
-                package_on_finish(job)
-                return
+                need_pkg = True
+        if need_pkg:
+            package_on_finish(job)
+            return
 
 
 def package_on_finish(job):
     """cache → library layout; default (no-cache) → stage stream zip for clicker"""
     def _w():
-        with job.lock:
-            done_bids = [b for b in job.done]
+        try:
+            done_bids = list(job.done)   # GIL-safe snapshot, no lock needed
+            print(f"[pkg] start bids={done_bids} cache={job.cache}", flush=True)
+        except Exception as e:
+            print(f"[pkg] snapshot err {e}", flush=True); return
         try:
             if job.cache:
                 for b in done_bids:
@@ -817,6 +823,8 @@ def package_on_finish(job):
                         shutil.rmtree(os.path.join(APP_ROOT, dd, str(b)),
                                       ignore_errors=True)
         except Exception as e:
+            import traceback as _tb
+            print("[pkg] ERR", _tb.format_exc()[-400:], flush=True)
             job.logf(f"package err {str(e)[:90]}")
 
     threading.Thread(target=_w, daemon=True).start()
