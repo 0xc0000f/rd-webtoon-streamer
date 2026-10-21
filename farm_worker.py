@@ -221,6 +221,7 @@ def _pop_identity(prefer="active"):
 
 
 def main():
+    global REUSE_ACCT
     import signal
 
     class StageTO(Exception):
