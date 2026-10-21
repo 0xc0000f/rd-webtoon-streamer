@@ -516,8 +516,23 @@ LANE_IDX = [0]
 
 # ---- prewarmed identity pool: ready accounts so downloads skip email/signup ----
 POOL_DIR = os.path.join(DATA_DIR, "pool")
-POOL_TARGET = int(os.environ.get("POOL_TARGET", "10"))
+# unbounded identity farming (user order 2026-10-22): farm forever, staggered,
+# no ceiling — target number just has to exceed any realistic ready-count
+POOL_TARGET = int(os.environ.get("POOL_TARGET", "500"))
 PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "3"))
+
+
+def rotate_logs():
+    """keep lane/pre/dl logs bounded: >8MB → shift to .1 (single history)"""
+    for pth in glob.glob(os.path.join(DATA_DIR, "*", "*.log")) + \
+            [os.path.join(POOL_DIR, "pre.log")]:
+        try:
+            if os.path.getsize(pth) > 8 * 1024 * 1024:
+                old = pth + ".1"
+                os.replace(pth, old)
+                open(pth, "w").close()
+        except OSError:
+            pass
 
 
 def take_pool():
@@ -920,12 +935,15 @@ def package_on_finish(job):
 
 RESULT_MAX_AGE_HOURS = float(os.environ.get("RESULT_MAX_AGE_HOURS", "48"))
 
+_T0_APP = time.time()
+
 
 def dl_sweeper():
     """transient result store: mtime-based purge after RESULT_MAX_AGE_HOURS (default 48h);
     within window re-download serves instantly"""
     while True:
         time.sleep(300)
+        rotate_logs()
         try:
             root = os.path.join(DATA_DIR, "dl")
             now = time.time()
@@ -1105,9 +1123,15 @@ function poll(force){
  }).catch(()=>{})}
 async function poolTick(){
  try{const r=await fetch('/api/pool');const j=await r.json();
-  let t=`identity pool ${j.ready}/${j.target}`;
-  if(j.ready<j.target)t+=` · refilling ${j.refilling} (ETA ~${Math.max(1,Math.round(j.eta_s/60))}m)`;
-  $('poolpill').textContent=t}catch(e){}}
+  if(j.unbounded){
+   let t=`identity farm: ${j.ready} ready`;
+   if(j.refilling)t+=` · farming ${j.refilling}`;
+   $('poolpill').textContent=t;
+  }else{
+   let t=`identity pool ${j.ready}/${j.target}`;
+   if(j.ready<j.target)t+=` · refilling ${j.refilling} (ETA ~${Math.max(1,Math.round(j.eta_s/60))}m)`;
+   $('poolpill').textContent=t;}
+ }catch(e){}}
 setInterval(poolTick,6000);poolTick();
 async function loadLib(){
  const c=$('cache');
@@ -1293,6 +1317,17 @@ class H(BaseHTTPRequestHandler):
             self._json({}, 404)
 
     def do_GET(self):
+        p0 = urllib.parse.urlparse(self.path).path
+        if p0 == "/healthz":      # container self-run health probe (agent-free ops)
+            b = json.dumps({"ok": True,
+                            "uptime_s": round(time.time() - _T0_APP),
+                            "pool_ready": len(glob.glob(os.path.join(
+                                POOL_DIR, "*.json")))}) .encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+            return
         if not check_auth(self):
             return
         p = urllib.parse.urlparse(self.path).path
@@ -1376,7 +1411,8 @@ class H(BaseHTTPRequestHandler):
             eta = ((POOL_TARGET - ready) * per) // max(busy, 1) \
                 if ready < POOL_TARGET else 0
             return self._json({"ready": ready, "refilling": busy,
-                               "target": POOL_TARGET, "eta_s": eta})
+                               "target": POOL_TARGET, "eta_s": eta,
+                               "unbounded": POOL_TARGET >= 100})
         if p == "/api/library":
             idx = lib_scan()
             series = {}
