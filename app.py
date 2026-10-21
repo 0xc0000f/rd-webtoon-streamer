@@ -973,6 +973,32 @@ RESULT_MAX_AGE_HOURS = float(os.environ.get("RESULT_MAX_AGE_HOURS", "48"))
 _T0_APP = time.time()
 
 
+def _recycle_inuse(now):
+    """inuse_*.json leak self-healing: identities consumed by workers whose lane
+    died mid-job never got recycled back; anything older than 15 min goes to the
+    active_* tier again (cookie probably still valid), hard-delete beyond 4000."""
+    pool_files = sorted(glob.glob(os.path.join(POOL_DIR, "inuse_*.json")),
+                        key=os.path.getmtime)
+    back = 0
+    for f in pool_files:
+        age = now - os.path.getmtime(f)
+        dst = os.path.join(POOL_DIR, "active_%d.json" % int(now)) \
+              .replace(str(int(now)), str(int(now) + back))
+        if age > 900 and not os.path.exists(dst):
+            try:
+                os.rename(f, dst)
+                back += 1
+            except OSError:
+                pass
+    stale = sorted(glob.glob(os.path.join(POOL_DIR, "inuse_*.json")),
+                   key=os.path.getmtime)
+    for f in stale[:max(0, len(stale) - 4000)]:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
 def dl_sweeper():
     """transient result store: mtime-based purge after RESULT_MAX_AGE_HOURS (default 48h);
     within window re-download serves instantly"""
@@ -993,6 +1019,7 @@ def dl_sweeper():
                     pass
         except Exception:
             pass
+        _recycle_inuse(time.time())
 
 
 threading.Thread(target=dl_sweeper, daemon=True).start()
