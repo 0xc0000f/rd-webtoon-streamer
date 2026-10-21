@@ -282,6 +282,11 @@ def route_claims(w, bids):
              "return_url_at_fail": "", "is_prefer_return_api_endpoint": "true", "is_v2": "true"}
         rp = w.get("https://ridibooks.com/apps/books/api/payment/route/book",
                    params=q, timeout=30)
+        if rp.status_code == 400 and "구매할 수 없습니다" in (rp.text or ""):
+            # RIDI blocks THIS episode at payment layer (Selection-only lock) —
+            # distinct from 'no coupon left'; report once per bid
+            print(f"    PURCHASE_LOCK {bid}", flush=True)
+            continue
         if rp.status_code != 200:
             continue
         j = rp.json()

@@ -701,9 +701,13 @@ def lane_run(job, lane):
         got = {k: v for k, v in (st.get("done") or {}).items()
                if int((v or {}).get("pages") or 0) > 0}
         ce_cnt = {}
+        lock_here = set()
         try:
             full_log = open(logtail, "rb").read()[-4000:].decode(errors="ignore")
             for line in full_log.splitlines():
+                mpl = re.search(r"PURCHASE_LOCK (\d+)", line)
+                if mpl:
+                    lock_here.add(mpl.group(1))
                 mpaid = re.search(r"CLAIMS_EMPTY ([\d,]+)", line)
                 if mpaid:
                     for x in mpaid.group(1).split(","):
@@ -715,10 +719,17 @@ def lane_run(job, lane):
             for bb, cc in ce_cnt.items():
                 job.claims_empty[bb] = min(9, job.claims_empty.get(bb, 0) + cc)
         paid_here = {b for b, c in ce_cnt.items()
-                     if c >= 2 or job.claims_empty.get(b, 0) >= 2}
+                     if c >= 2 or job.claims_empty.get(b, 0) >= 2} | lock_here
         with job.lock:
             job.done.update(got)
-            job.paid |= (paid_here & {str(b) for b in bids}) - set(job.done)
+            newly_paid = ((paid_here | lock_here)
+                          & {str(b) for b in bids}) - set(job.done)
+            for lb in lock_here & newly_paid:
+                job.lock_reason[lb] = "RIDI purchase-lock (Selection-only ep)"
+            for lb in paid_here & newly_paid:
+                job.lock_reason.setdefault(
+                    lb, "pool identity ไม่มี coupon ว่าง / no free claim path")
+            job.paid |= newly_paid
             miss = [b for b in bids if str(b) not in got and str(b) not in job.paid]
             for b in miss:
                 job.tries[b] += 1
@@ -1107,8 +1118,9 @@ function poll(force){
   if(j.active&&pr.step)statusShow(j);
   let changed=false;
   (j.log&&j.log.length)&&statusShow(j);
+  const PR=j.paid_reasons||{};
   (j.paid_list||[]).forEach(b=>{const e=EPS.find(x=>x.b===b);
-   if(e&&!e.paid){e.paid=true;e.reason='pool identity ไม่มี coupon ว่าง / no free claim path';changed=true;
+   if(e&&!e.paid){e.paid=true;e.reason=(PR[b]||'no free claim path');changed=true;
     statusShow(j)}});
   EPS.forEach((e,i)=>{
    if(j.done_list.includes(e.b)&&!e.pages){
@@ -1374,6 +1386,7 @@ class H(BaseHTTPRequestHandler):
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "paid_list": sorted(j.paid),
                         "bid_status": _bid_stage(j),
+                        "paid_reasons": j.lock_reason,
                         "pending_n": max(0, pend + fail), "fail_n": fail,
                         "progress": job_progress(j), "cache": j.cache,
                         "stream_url": j.stream_url,
