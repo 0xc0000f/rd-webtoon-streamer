@@ -283,19 +283,33 @@ def book_meta(bid):
 
 
 def neighbors(j):
+    """returns [(bid_str, is_opened_or_None), ...] — RIDI catalogs unreleased eps
+    with property.is_open == False; those must be hidden from the ep list."""
     out = []
     prop = (j.get("series") or {}).get("property") or {}
     for d in ("prev_books", "next_books"):
         blk = prop.get(d) or {}
         vals = list(blk.values()) if isinstance(blk, dict) else list(blk)
         for x in vals:
+            bid = None
+            opened = None
             if isinstance(x, dict):
                 for k in ("b_id", "id"):
                     if x.get(k):
-                        out.append(str(x[k])); break
+                        bid = str(x[k]); break
+                iv = x.get("is_opened")
+                if iv is not None:
+                    opened = bool(iv)
             elif isinstance(x, (int, str)):
-                out.append(str(x))
+                bid = str(x)
+            if bid:
+                out.append((bid, opened))
     return out
+
+
+def _ep_flags(j):
+    """flat {bid: is_opened} map from one book_meta response."""
+    return {b: o for b, o in neighbors(j) if o is not None}
 
 
 _EP_TITLES = None
@@ -412,7 +426,7 @@ def resolve(query):
         ttl_title = prop.get("title") or ""
     except Exception:
         pass
-    cf = os.path.join(CACHE_DIR, root + ".json")
+    cf = os.path.join(CACHE_DIR, root + ".v2.json")   # v2: is_open-filtered lists
     if os.path.exists(cf):
         cached = json.load(open(cf))
         # never serve a truncated cache when we know the series is bigger
@@ -420,16 +434,18 @@ def resolve(query):
             return cached
         os.remove(cf)
     ids = {root}
+    flags = {}          # bid -> is_opened (only entries RIDI explicitly marks)
     frontier = [root]
     guard = 0
     while frontier and (guard < expect * 3 + 30):
         guard += 1
         b = frontier.pop()
         try:
-            nb = neighbors(book_meta(b))
+            jn = book_meta(b)
         except Exception:
             continue
-        for n in nb:
+        for n, opened in neighbors(jn):
+            flags.setdefault(n, opened)
             if n not in ids:
                 ids.add(n); frontier.append(n)
         time.sleep(0.12)
@@ -444,16 +460,23 @@ def resolve(query):
             guard += 1
             b = frontier.pop()
             try:
-                nb = neighbors(book_meta(b))
+                nb = [(n, o) for n, o in neighbors(book_meta(b))]
             except Exception:
                 continue
-            for n in nb:
+            for n, opened in nb:
+                flags.setdefault(n, opened)
                 if n not in ids:
                     ids.add(n); frontier.append(n)
             time.sleep(0.12)
             if len(ids) >= expect:
                 break
         order = sorted(ids, key=int)
+    # hide unreleased eps (property.is_open == False) — RIDI payment route 400s them
+    hidden = [b for b, o in flags.items() if o is False and b != root]
+    order = [b for b in order if flags.get(b, True)]
+    if hidden:
+        print(f"    [resolve] hid {len(hidden)} unreleased ep(s): {hidden[:6]}",
+              flush=True)
     if expect > 2 and len(order) < expect:
         return order                          # do NOT cache truncated result
     json.dump(order, open(cf, "w"))
