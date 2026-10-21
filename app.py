@@ -982,8 +982,8 @@ def _recycle_inuse(now):
     back = 0
     for f in pool_files:
         age = now - os.path.getmtime(f)
-        dst = os.path.join(POOL_DIR, "active_%d.json" % int(now)) \
-              .replace(str(int(now)), str(int(now) + back))
+        dst = os.path.join(POOL_DIR,
+                           "active_%d%d.json" % (int(now), back * 7))
         if age > 900 and not os.path.exists(dst):
             try:
                 os.rename(f, dst)
