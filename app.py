@@ -149,10 +149,27 @@ def sanitize(s, maxlen=60):
 
 
 def ep_label(bid):
-    """(nn, folder_name) for a downloaded ep: '01 · 프렛리스 원더!!_제1화 ...'"""
+    """(nn, folder_name) for a downloaded ep — enrich from RIDI API when cold"""
     m = load_meta()
     root = m["root"].get(bid)
-    series = (m.get("title") or {}).get(root) if root else None
+    if not root or bid not in m["no"]:
+        try:  # cold container / meta wiped → refill via book api
+            jinfo = book_meta(bid)
+            s = jinfo.get("series") or {}
+            prop = s.get("property") or {}
+            root = str(s.get("id") or "") or root or bid
+            m["root"][bid] = root
+            m["no"][bid] = int(prop.get("volume") or m["no"].get(bid) or 0) or \
+                int(m["no"].get(root) or 1)
+            ttl = (prop.get("title") or "").strip() or (jinfo.get("title") or "").strip()
+            if ttl:
+                m.setdefault("title", {})[str(root)] = re.sub(
+                    r"^\[[^\]]*\]\s*", "", ttl)
+            save_meta(m)
+            root = m["root"].get(bid)
+        except Exception:
+            pass
+    series = (m.get("title") or {}).get(str(root)) if root else None
     name = (load_titles().get(bid) or "").strip() or ("ep_" + bid)
     no = m["no"].get(bid)
     head = f"{int(no):02d} " if no else ""
