@@ -1,6 +1,6 @@
 # farm_worker.py — single-thread account builder (one process = one isolated identity)
 # usage: python3 farm_worker.py <state_file> <out_root> <b_id> [<b_id>...]
-import sys, os, json, time
+import sys, os, json, time, glob
 import random
 import requests, uuid
 
@@ -91,6 +91,9 @@ def build_account(remaining):
         STEP("reusing pooled account")
         try:
             j = json.load(open(REUSE_ACCT))
+        except FileNotFoundError:
+            print("    [recycle] reason=no-identity-file-left (pool empty)")
+            return None
         except Exception as e:
             print("    pool read err:", str(e)[:80]); return None
         F.TMAIL_TOKEN[0] = j.get("tmail_tok") or ""
@@ -198,6 +201,25 @@ def build_account(remaining):
     return claimed, w, str(uuid.uuid4()), uid, addr
 
 
+def _pop_identity(prefer="active"):
+    """atomically grab next identity file: 'active' tier = recycled cookie-valid
+    (good for FREE eps), 'pool' tier = virgin signup w/ untouched coupons (needed
+    for PAID claims). Returns (dict, consumed_path) or (None, None)."""
+    pats = {"active": ("active_*.json", "pool_*.json"),
+            "pool": ("pool_*.json", "active_*.json")}[prefer]
+    for pat in pats:
+        for f in sorted(glob.glob(os.path.join(POOL_DIR, pat))):
+            dst = os.path.join(POOL_DIR,
+                               f"inuse_{int(time.time()*1000)}_{os.getpid()%997}.json")
+            try:
+                os.rename(f, dst)
+                with open(dst) as fh:
+                    return json.load(fh), dst
+            except Exception:
+                continue
+    return None, None
+
+
 def main():
     import signal
 
@@ -235,6 +257,16 @@ def main():
         if not remaining:
             break
         apply_seed()   # rotate Databay session per attempt (bad exit IPs happen)
+        prefer = "pool" if i >= 1 else "active"   # virgin coupons on retry — PAID needs them
+        if REUSE_ACCT and not os.path.exists(REUSE_ACCT):
+            acct_j, newpth = _pop_identity(prefer)
+            if acct_j:
+                os.environ["REUSE_ACCT"] = REUSE_ACCT = newpth
+                F.TMAIL_TOKEN[0] = acct_j.get("tmail_tok") or ""
+                print(f"    [identity] popped {os.path.basename(newpth)} ({prefer}-tier)",
+                      flush=True)
+            elif i == 0:
+                pass   # no pool at all → fresh-signup path below handles it
         print(f"[w{os.getpid() % 10000}] account #{i+1} | left={len(remaining)}", flush=True)
         signal.alarm(int(os.environ.get("STAGE_TIMEOUT", "90")))  # hard cap/identity
         ce_hits = 0
