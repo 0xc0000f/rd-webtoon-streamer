@@ -1039,7 +1039,8 @@ function renderEps(){
  <div class=serieshead><img src='${CUR.cover||''}' onerror="this.style.opacity=.15">
  <div><h3 style=margin:0>${esc(CUR.title||'')}</h3>
  <span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div></div>`;
- let ck=`<label style="display:flex;gap:6px;align-items:center;font-size:12px;color:#aaa">
+ let ck=`<div class=muted style="margin:2px 0 8px">💡 ตอนฟรี = เร็ว (~60-90s) · ตอนเสียตัง = ใช้ free-selection coupon ของ identity (ETA ~2min); ถ้า coupon หมดจะ fail-fast เป็น 💸 no-free-path แทนการค้าง</div>
+ <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:#aaa">
   <input type=checkbox id=cacheck> cache ไว้บน server</label>`;
  EPS.forEach((e,i)=>{const tag=e.paid?`<span class=muted title='${e.reason||''}'>💸 no free path</span>`
    :(e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`

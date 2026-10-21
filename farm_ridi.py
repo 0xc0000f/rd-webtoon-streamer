@@ -34,9 +34,31 @@ def jprint(tag, r):
 
 # ---------- temp mail ----------
 _MT_HDR = {"User-Agent": WEB_UA}
+_PROVIDER_CACHE = [None]   # index of last provider RIDI accepted
 
-def _mtm_new():
-    """fallback provider mail.tm → (addr, 'mtm:<jwt>')"""
+
+def _ridi_email_ok(addr):
+    """cheap oracle: does RIDI signup accept this domain at all?"""
+    try:
+        r = requests.post(
+            "https://ridibooks.com/apps/frontend/v1/account/validation/email",
+            json={"email": addr},
+            headers={"User-Agent": WEB_UA, "Origin": "https://ridibooks.com"},
+            timeout=20)
+        d = (r.json() or {}).get("data") or {}
+        return d.get("valid") is True
+    except Exception as e:
+        print("  [email-domain probe err]", str(e)[:60])
+        return False          # network flake → don't lock the provider in
+
+
+def _gen_tempmail():
+    a = requests.get("https://api.tempmail.lol/generate",
+                     headers={"User-Agent": WEB_UA}, timeout=30).json()
+    return a["address"], a["token"]
+
+
+def _gen_mtm():
     d = requests.get("https://api.mail.tm/domains", headers=_MT_HDR, timeout=30).json()
     dom = d["hydra:member"][0]["domain"]
     addr = "rw" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10)) \
@@ -50,26 +72,37 @@ def _mtm_new():
                         json={"address": addr, "password": pw}, timeout=30).json()["token"]
     return addr, "mtm:" + tok
 
+
+def _gen_tmio():
+    t = requests.post("https://api.internal.temp-mail.io/api/v3/email/new",
+                      headers={"User-Agent": "okhttp/4.9.1"}, timeout=20).json()
+    return t["email"], "tmio:" + t["email"]
+
+
+_PROVIDERS = [_gen_tempmail, _gen_mtm, _gen_tmio]
+
 def tmail_new():
-    last = None
-    for att in range(2):
-        try:
-            r = requests.get("https://api.tempmail.lol/generate",
-                             headers={"User-Agent": WEB_UA},
-                             timeout=30 if not att else 45)
-            a = r.json()
-            addr, tok = a.get("address"), a.get("token")
-            if addr and tok:
-                return addr, tok
-            raise ValueError(f"bad payload {str(a)[:60]}")
-        except Exception as e:
-            last = e
-            print("  [tmail gen retry]", str(e)[:80]); time.sleep(3 * (att + 1))
-    try:                      # primary provider rate-limited → mail.tm
-        return _mtm_new()
-    except Exception as e:
-        print("  [mail.tm fallback failed]", str(e)[:90])
-        raise last
+    """provider chain: try cached-good provider first; every candidate address is
+    validated against RIDI's signup email-check so blacklisted domains are skipped"""
+    order = list(range(len(_PROVIDERS)))
+    k = _PROVIDER_CACHE[0]
+    if k is not None and k in order:
+        order.remove(k); order.insert(0, k)
+    errs = []
+    for idx in order:
+        for att in range(2):
+            try:
+                addr, tok = _PROVIDERS[idx]()
+                if _ridi_email_ok(addr):
+                    _PROVIDER_CACHE[0] = idx
+                    return addr, tok
+                errs.append(f"p{idx}:domain-rejected")
+                break                      # domain dead → next provider now
+            except Exception as e:
+                errs.append(f"p{idx}:{str(e)[:50]}")
+                time.sleep(3 * (att + 1))
+    raise RuntimeError("all mail providers failed: " + "; ".join(errs[:6]))
+
 
 def _mtm_poll(token, want_otp=False):
     h = {**_MT_HDR, "Authorization": "Bearer " + token[4:]}
@@ -95,9 +128,35 @@ def _mtm_poll(token, want_otp=False):
     fs = re.findall(r'href="(https?://[^"]+verify[^"]*)"', dec)
     return ("link", fs[0].replace("&amp;", "&")) if fs else None
 
+
+def _tmio_poll(token, want_otp=False):
+    ms = []
+    for _t in range(6):
+        try:
+            r = requests.get(f"https://api.internal.temp-mail.io/api/v3/email/"
+                             f"{token[5:]}/messages",
+                             headers={"User-Agent": "okhttp/4.9.1"}, timeout=20)
+            ms = r.json() or []
+            break
+        except Exception as e:
+            print("  [tmio poll retry]", str(e)[:80]); time.sleep(15)
+    if not ms:
+        return None
+    m = max(ms, key=lambda x: str(x.get("received_at") or ""))
+    body = (m.get("body_text") or "") + (m.get("body_html") or "")
+    dec = quopri.decodestring(body.encode()).decode("utf-8", "ignore")
+    if want_otp:
+        cs = re.findall(r"\b\d{6}\b", re.sub("<[^>]+>", " ", dec))
+        return ("otp", cs[0]) if cs else None
+    fs = re.findall(r'href="(https?://[^"]+verify[^"]*)"', dec)
+    return ("link", fs[0].replace("&amp;", "&")) if fs else None
+
+
 def tmail_poll(token, want_otp=False):
     if token.startswith("mtm:"):
         return _mtm_poll(token, want_otp)
+    if token.startswith("tmio:"):
+        return _tmio_poll(token, want_otp)
     for _t in range(5):
         try:
             r = requests.get(f"https://api.tempmail.lol/auth/{token}",

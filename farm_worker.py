@@ -117,8 +117,19 @@ def build_account(remaining):
             w = requests.Session()
             w.cookies.update(wck)
             w.headers["User-Agent"] = F.WEB_UA
-        if not F.verify_adult(w):
-            print("    adult verify failed (continuing)")
+        # 19+ titles need verified-adult on the account; RIDI gates ad-hoc cert
+        # by network — rotate Databay exit until it passes (≤5 tries)
+        for att in range(5):
+            try:
+                if F.verify_adult(w):
+                    break
+            except Exception as e:
+                print("    adult verify err:", str(e)[:60])
+            print(f"    adult verify retry {att+1}/5 (rotate exit IP)")
+            apply_seed()
+            time.sleep(2)
+        else:
+            print("    [recycle] reason=adult-verify-failed")
         claimed = []
         for c in dict.fromkeys(F.route_claims(w, remaining)):
             if c not in claimed:
@@ -170,8 +181,15 @@ def build_account(remaining):
     w = requests.Session()
     w.cookies.update(wck)
     w.headers["User-Agent"] = F.WEB_UA
-    if not F.verify_adult(w):
-        print("    adult verify failed (continuing)")
+    for att in range(5):   # RIDI gates ad-hoc cert by network → rotate exits
+        try:
+            if F.verify_adult(w):
+                break
+        except Exception as e:
+            print("    adult verify err:", str(e)[:60])
+        print(f"    adult verify retry {att+1}/5 (rotate exit IP)")
+        apply_seed()
+        time.sleep(2)
     STEP("claim free coupons")
     claimed = []
     for c in dict.fromkeys(F.route_claims(w, remaining)):
