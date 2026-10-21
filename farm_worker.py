@@ -1,7 +1,15 @@
 # farm_worker.py — single-thread account builder (one process = one isolated identity)
 # usage: python3 farm_worker.py <state_file> <out_root> <b_id> [<b_id>...]
 import sys, os, json, time
+import random
 import requests, uuid
+
+
+def STEP(msg):
+    print(f"STEP {msg} (t+{time.time()-_T0:.0f}s)", flush=True)
+
+
+_T0 = time.time()
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
 PROXY = os.environ.get("RIDI_PROXY")
@@ -36,9 +44,11 @@ def save(st):
 
 def build_account(remaining):
     """one throwaway account; returns (claims, session, dev, uid, addr) or None"""
+    STEP("making new email")
     addr, tok = F.tmail_new()
     F.TMAIL_TOKEN[0] = tok
     uid = pw = None
+    STEP("signup")
     for attempt in range(2):
         try:
             uid, pw, ck0 = F.signup(addr)
@@ -48,6 +58,7 @@ def build_account(remaining):
             print(f"    signup err {str(e)[:80]}")
     if not uid:
         return None
+    STEP("waiting verification mail")
     time.sleep(6)
     link = None
     for _ in range(20):
@@ -58,6 +69,7 @@ def build_account(remaining):
             break
     ok = False
     if link:
+        STEP("verify email")
         for a in range(2):
             if F.activate(link):
                 ok = True
@@ -65,6 +77,7 @@ def build_account(remaining):
     if not ok:
         print("    activation failed")
         return None
+    STEP("login + otp")
     wck = F.full_login(uid, pw)
     if not wck:
         print("    login/otp failed")
@@ -74,6 +87,7 @@ def build_account(remaining):
     w.headers["User-Agent"] = F.WEB_UA
     if not F.verify_adult(w):
         print("    adult verify failed (continuing)")
+    STEP("claim free coupons")
     claimed = []
     for c in dict.fromkeys(F.route_claims(w, remaining)):
         if c not in claimed:

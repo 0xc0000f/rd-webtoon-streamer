@@ -224,6 +224,7 @@ def app_download(w, bids, outroot=None, dev=None):
             t = "cover" if i == 0 else "content"
             u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
                  f"?page_num={i}&type={t}&quality=recommended&device_id={dev}")
+            time.sleep(random.uniform(0.05, 0.4))
             rr = a.get(u, timeout=90)
             return i, rr
 

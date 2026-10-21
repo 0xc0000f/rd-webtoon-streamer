@@ -39,16 +39,30 @@ BOOK_API = "https://book-api.ridibooks.com/books/"
 
 def search_titles(q):
     r = SREQ.get(SEARCH_API, params={"keyword": q, "limit": 24}, timeout=25)
-    books = (r.json() or {}).get("books") or []
+    books = list((r.json() or {}).get("books") or [])
+    # grouped/series nodes may ride alongside flat entries: they carry
+    # series_id + book_count + series_info instead of a single b_id
+    grouped = []
+    for b in books:
+        si = b.get("series_info") or {}
+        if b.get("series_id") and not str(b.get("b_id") or "").isdigit():
+            grouped.append({"b_id": b.get("series_id"),
+                            "title": si.get("title") or b.get("title"),
+                            "web_title": None,
+                            "author": si.get("author") or "",
+                            "age_limit": si.get("age_limit") or b.get("age_limit"),
+                            "book_count": b.get("book_count") or si.get("book_count"),
+                            "is_serial": True})
+    items = books + grouped
     out = []
     seen = {}
-    for b in sorted(books, key=lambda x: -int(x.get("book_count") or 0)):
-        bid = str(b.get("b_id") or "")
+    for b in sorted(items, key=lambda x: -int(x.get("book_count") or 0)):
+        bid = str(b.get("series_id") or b.get("b_id") or "")
         if not bid.isdigit():
             continue
         title = ((b.get("web_title") or "") + "").strip() or (b.get("title") or "").strip()
         if not title or title.startswith("["):
-            title = re.sub(r"^\[[^\]]*\]\s*", "", (b.get("title") or "").strip()) or title
+            title = re.sub(r"^\[[^\]]*\]\s*", "", title) or title
         norm = re.sub(r"\(.*?\)", "", title).strip().lower()
         if norm and norm in seen:
             continue  # one card per series
@@ -58,7 +72,7 @@ def search_titles(q):
             "sid": bid,
             "title": title,
             "author": (b.get("author") or ""),
-            "adult": int(b.get("age_limit") or 0) == 19,
+            "adult": int(b.get("age_limit") or 0) == 19,   # never filtered out
             "serial": bool(b.get("is_serial")),
             "complete": bool(b.get("is_series_complete")),
             "count": int(b.get("book_count") or 0),
@@ -241,6 +255,50 @@ JOB = None
 LANE_IDX = [0]
 
 
+def job_progress(j):
+    """live step / percent / eta from lane logs + decrypted file counts"""
+    try:
+        files, steps, ppe_vals = 0, [], []
+        for l in j.lanes:
+            try:
+                tail = open(os.path.join(l["outroot"], "lane.log"), "rb").read()[-1200:]
+                for line in tail.decode(errors="ignore").splitlines():
+                    if line.startswith("STEP"):
+                        steps.append(line.strip())
+            except Exception:
+                pass
+            try:
+                stf = json.load(open(l["statefile"]))
+                for v in (stf.get("done") or {}).values():
+                    if (v or {}).get("pages"):
+                        ppe_vals.append(int(v["pages"]))
+            except Exception:
+                pass
+            for b in l["bids"]:
+                d = os.path.join(l["outroot"], str(b))
+                if os.path.isdir(d):
+                    files += sum(1 for f in os.listdir(d)
+                                 if f.endswith((".webp", ".jpg")))
+        done_pages = [int((v or {}).get("pages") or 0) for v in j.done.values()]
+        ppe_vals += done_pages
+        est_ppe = max(ppe_vals) if ppe_vals else 120
+        total_eps = len(j.all)
+        est_total = max(est_ppe * total_eps, files + 1)
+        pct = min(99, int(files * 100 / est_total)) if j.alive else 100
+        now = time.time()
+        prev_files, prev_t = getattr(j, "_prog_prev", (None, None))
+        eta_min = None
+        if files > 2 and prev_files is not None and files > prev_files and now - prev_t > 4:
+            rate = (files - prev_files) / max(now - prev_t, 5)
+            eta_min = round(max(0.3, (est_total - files) / max(rate, .01)) / 60)
+        j._prog_prev = (files, now)
+        step = steps[-1] if steps else ("downloading pages" if files else "preparing")
+        return {"step": step.replace("STEP ", "", 1), "pct": pct,
+                "eta_min": eta_min, "pages_now": files}
+    except Exception:
+        return {}
+
+
 def lane_run(job, lane):
     p = lane["proc"]
     sf = lane["statefile"]; out = lane["outroot"]; bids = lane["bids"]
@@ -317,8 +375,8 @@ def aimd_supervisor(job):
             if not bids:
                 break
             with job.lock:
-                LANE_IDX += 1
-                idx = LANE_IDX % len(DL_DIRS)
+                LANE_IDX[0] = (LANE_IDX[0] + 1) % len(DL_DIRS)
+                idx = LANE_IDX[0]
             out = DL_DIRS[idx]
             os.makedirs(out, exist_ok=True)
             sf = os.path.join(DATA_DIR, f"w{idx:02d}.state.json")
@@ -453,11 +511,14 @@ function renderEps(){
 function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b);
  const btn=document.querySelector('#actionbar button');if(btn)btn.textContent=`⬇ โหลดตอนที่เลือก (${SEL.size})`}
 function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)});renderEps()}
+let DL_BIDS=[];
+function clickA(href){const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),400)}
 async function dlSelected(){
  const missing=[...SEL].filter(b=>!EPS.find(e=>e.b===b&&e.pages));
  if(!missing.length)return alert('เลือกตอนที่ยังไม่ได้โหลดก่อน');
+ DL_BIDS=missing.slice();
  const r=await fetch('/api/download',{method:'POST',body:JSON.stringify({bids:missing})});const j=await r.json();
- status('🚀 เริ่มโหลด '+j.missing.length+' ตอน — progress จะขึ้นบนหัวเว็บ\n');poll(true)}
+ poll(true)}
 function bundleZip(){const done=EPS.filter(e=>e.pages).map(e=>e.b);location.href='/bundle.zip?bids='+done.join(',')}
 function home(){$('out').innerHTML='<h3>…</h3>';$('actionbar').style.display='none';$('q').value='';
  clearInterval(POLLT);POLLT=null;$('pbar').style.display='none';$('wlab').textContent='idle'}
@@ -466,8 +527,13 @@ function poll(force){
  if(POLLT&&!force)return; if(!POLLT)POLLT=setInterval(()=>poll(),4000);
  fetch('/api/job').then(r=>r.json()).then(j=>{
   const tot=j.done_n+j.pending_n;
-  $('wlab').textContent=(j.active||tot)?`workers ${j.workers_now}/${j.workers_target} · ✅${j.done_n}/${tot}`:'idle';
-  const pb=$('pbar');pb.style.display=tot?'block':'none';pb.style.width=(tot?Math.round(j.done_n*100/tot):100)+'%';
+  const pr=j.progress||{};
+  const pctTxt=pr.pct!=null?`${pr.pct}%`:'';
+  const etaTxt=pr.eta_min!=null?`· ETA ~${pr.eta_min}m `:'';
+  $('wlab').textContent=(j.active||tot)?
+    `${pctTxt}${etaTxt}· workers ${j.workers_now}/${j.max_workers||16} · ✅${j.done_n}/${tot}`:'idle';
+  const pb=$('pbar');pb.style.display=tot?'block':'none';pb.style.width=(pr.pct||0)+'%';
+  if(j.active&&pr.step)statusShow(j);
   let changed=false;
   (j.log&&j.log.length)&&statusShow(j);
   EPS.forEach((e,i)=>{
@@ -475,19 +541,26 @@ function poll(force){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
     const row=$('r'+i);if(row)row.outerHTML=rowHTML(e,i,true)}});
   if(changed&&CUR)renderEps();
-  if(!j.active&&tot){clearInterval(POLLT);POLLT=null;if(CUR)renderEps()}
+  if(!j.active&&tot){
+   clearInterval(POLLT);POLLT=null;if(CUR)renderEps();statusHide();
+   const ready=(DL_BIDS||[]).filter(b=>EPS.find(e=>e.b===b&&e.pages));
+   DL_BIDS=[];
+   if(ready.length===1)clickA(`/ep/${ready[0]}.zip`);
+   else if(ready.length>1)clickA('/bundle.zip?bids='+ready.join(','))}
  }).catch(()=>{})}
 function rowHTML(e,i,fresh){
  return `<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
  <input type=checkbox class=sel data-b='${e.b}' ${(e.pages?'disabled':'')} onchange=tog(this)>
  <span class=no>${String(i+1).padStart(2,'0')}</span> <span style=flex:1>${esc(e.t)}</span></label>`+
- (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip</a></span>`
+ (e.pages?`<span><a href='/ep/${e.b}'>read ${e.pages}p</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
   :'<span class=muted>⏳</span>')+'</div>'}
 function statusShow(j){
  let s=$('status');
  if(!s){s=document.createElement('pre');s.id='status';$('out').before(s)}
  s.style.display='block';
- s.textContent=`workers=${j.workers_now}/${j.workers_target}  ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}\n`+(j.log.slice(-4).join('\n'))}
+ const pr=j.progress||{};
+ s.textContent=`⏬ ${pr.step||'…'} · ${pr.pct??''}${pr.eta_min!=null?('· ETA ~'+pr.eta_min+'m'):''}\\nworkers=${j.workers_now}/${j.max_workers||16} ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}`}
+function statusHide(){const s=$('status');if(s)s.style.display='none'}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 poll();
 </script></body></html>"""
@@ -579,8 +652,10 @@ class H(BaseHTTPRequestHandler):
             self._json({"active": j.alive, "finished": not j.alive,
                         "workers_now": len(j.lanes),
                         "workers_target": j.workers_target,
+                        "max_workers": j.max_workers,
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "pending_n": pend + fail, "fail_n": fail,
+                        "progress": job_progress(j),
                         "log": j.log[-8:], "done_list": done_list})
         elif mz:
             bid = mz.group(1)
