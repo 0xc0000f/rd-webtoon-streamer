@@ -519,6 +519,7 @@ class Job:
         self.paid = set()
         self.claims_empty = {}
         self.bid_stage = {}
+        self.lock_reason = {}   # bid -> human reason for paid_list entries
         self.log = []
         self.lock = threading.Lock()
         self.lanes = []
@@ -1409,7 +1410,7 @@ class H(BaseHTTPRequestHandler):
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "paid_list": sorted(j.paid),
                         "bid_status": _bid_stage(j),
-                        "paid_reasons": j.lock_reason,
+                        "paid_reasons": getattr(j, "lock_reason", {}) or {},
                         "pending_n": max(0, pend + fail), "fail_n": fail,
                         "progress": job_progress(j), "cache": j.cache,
                         "stream_url": j.stream_url,
