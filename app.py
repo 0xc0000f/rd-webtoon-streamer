@@ -683,6 +683,7 @@ class H(BaseHTTPRequestHandler):
             name, folder = ep_label(bid)
             slug = re.sub(r"[^A-Za-z0-9가-힣ㄱ-ㅎㅏ-ㅣ._ -]", "", folder)[:80].strip() or ("EP" + bid)
             fn = urllib.parse.quote(slug + ".zip")
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", folder)[:70].strip() or ("EP" + bid)
             zp = os.path.join(DATA_DIR, "zips"); os.makedirs(zp, exist_ok=True)
             zf = os.path.join(zp, fn[:60] + "_" + bid + ".zip")
             with zipfile.ZipFile(zf, "w") as z:
@@ -692,7 +693,7 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Disposition",
-                             f'attachment; filename="{slug}.zip"; filename*=UTF-8\'\'{fn}')
+                             f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
             self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
             return
         elif p == "/bundle.zip":
@@ -718,10 +719,11 @@ class H(BaseHTTPRequestHandler):
             slug = sanitize((load_meta()["title"].get(
                 load_meta()["root"].get(bids[0], ""), "") or "export"), 60) + "_selected"
             fn = urllib.parse.quote(slug + ".zip")
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", slug)[:70].strip() or "export_selected"
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Disposition",
-                             f'attachment; filename="{slug}.zip"; filename*=UTF-8\'\'{fn}')
+                             f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
             self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
         elif mr:
             bid = mr.group(1)
