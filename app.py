@@ -494,6 +494,8 @@ class Job:
         self.failed = []
         self.tries = {}
         self.paid = set()
+        self.claims_empty = {}
+        self.bid_stage = {}
         self.log = []
         self.lock = threading.Lock()
         self.lanes = []
@@ -683,7 +685,7 @@ def lane_run(job, lane):
             pass
         got = {k: v for k, v in (st.get("done") or {}).items()
                if int((v or {}).get("pages") or 0) > 0}
-        paid_cnt = {}
+        ce_cnt = {}
         try:
             full_log = open(logtail, "rb").read()[-4000:].decode(errors="ignore")
             for line in full_log.splitlines():
@@ -691,11 +693,14 @@ def lane_run(job, lane):
                 if mpaid:
                     for x in mpaid.group(1).split(","):
                         if x.isdigit():
-                            paid_cnt[x] = paid_cnt.get(x, 0) + 1
+                            ce_cnt[x] = ce_cnt.get(x, 0) + 1
         except Exception:
             pass
-        # ≥2 identity attempts with zero claim path → treat as 'no free path'
-        paid_here = {b for b, c in paid_cnt.items() if c >= 2}
+        with job.lock:   # job-lifetime counter (survives lane log rotation)
+            for bb, cc in ce_cnt.items():
+                job.claims_empty[bb] = min(9, job.claims_empty.get(bb, 0) + cc)
+        paid_here = {b for b, c in ce_cnt.items()
+                     if c >= 2 or job.claims_empty.get(b, 0) >= 2}
         with job.lock:
             job.done.update(got)
             job.paid |= (paid_here & {str(b) for b in bids}) - set(job.done)
@@ -724,7 +729,8 @@ def lane_run(job, lane):
             if lane in job.lanes:
                 job.lanes.remove(lane)
             for b in bids:
-                if str(b) not in job.done and b not in job.pending:
+                sb = str(b)
+                if sb not in job.done and sb not in job.paid and b not in job.pending:
                     job.pending.append(b)
 
 
@@ -813,6 +819,50 @@ def aimd_supervisor(job):
         if need_pkg:
             package_on_finish(job)
             return
+
+
+STAGE_LABELS = (
+    ("reusing pooled account", "popping identity from pool"),
+    ("making new email", "building identity · tempmail"),
+    ("signup", "building identity · signup"),
+    ("waiting verification mail", "identity · waiting mail (tempmail)"),
+    ("verify email", "identity · activating"),
+    ("login + otp", "identity · login+otp"),
+    ("claim free coupons", "checking claim route / claiming"),
+    ("downloading pages", "downloading pages"),
+)
+
+
+def _bid_stage(j):
+    """map pending bids → the stage their lane is actually at right now"""
+    out = {}
+    try:
+        for l in j.lanes:
+            tail = open(os.path.join(l["outroot"], "lane.log"), "rb").read()[-1200:]
+            last = ""
+            cooling = False
+            for line in tail.decode(errors="ignore").splitlines():
+                if line.startswith("STEP"):
+                    last = line.strip()[5:].strip(); cooling = False
+                elif "cooling 45s" in line or "[tmail retry]" in line \
+                        or "Max retries" in line:
+                    cooling = True
+            if not cooling:
+                for pat, label in STAGE_LABELS:
+                    if pat in last:
+                        last = label; break
+            else:
+                last += " · provider/proxy flake — auto-retrying"
+            for b in l.get("bids") or []:
+                sb = str(b)
+                if sb in j.claims_empty and j.claims_empty[sb] >= 1 \
+                        and "claims" not in last.lower():
+                    out[sb] = "no free path on identity — confirming…"
+                else:
+                    out.setdefault(sb, last or "queued")
+    except Exception:
+        pass
+    return out
 
 
 def package_on_finish(job):
@@ -991,7 +1041,7 @@ function renderEps(){
  <span class=muted>${EPS.length} episodes · โหลดแล้ว ${EPS.filter(e=>e.pages).length}</span></div></div>`;
  let ck=`<label style="display:flex;gap:6px;align-items:center;font-size:12px;color:#aaa">
   <input type=checkbox id=cacheck> cache ไว้บน server</label>`;
- EPS.forEach((e,i)=>{const tag=e.paid?'<span class=muted>💸 no free path</span>'
+ EPS.forEach((e,i)=>{const tag=e.paid?`<span class=muted title='${e.reason||''}'>💸 no free path</span>`
    :(e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
     :'<span class=muted>—</span>');
   h+=`<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
@@ -1039,7 +1089,8 @@ function poll(force){
   let changed=false;
   (j.log&&j.log.length)&&statusShow(j);
   (j.paid_list||[]).forEach(b=>{const e=EPS.find(x=>x.b===b);
-   if(e&&!e.paid){e.paid=true;changed=true}});
+   if(e&&!e.paid){e.paid=true;e.reason='pool identity ไม่มี coupon ว่าง / no free claim path';changed=true;
+    statusShow(j)}});
   EPS.forEach((e,i)=>{
    if(j.done_list.includes(e.b)&&!e.pages){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
@@ -1083,7 +1134,7 @@ function delEps(b){if(!confirm('ลบตอนนี้จาก server cache?'
 function delSeries(n){if(!confirm('ลบทุกตอนของซีรีส์นี้จาก server cache?'))return;
  fetch('/api/delete',{method:'POST',body:JSON.stringify({series:n})}).then(loadLib)}
 function rowHTML(e,i,fresh){
- const tag=e.paid?'<span class=muted>💸 no free path</span>'
+ const tag=e.paid?`<span class=muted title='${e.reason||''}'>💸 no free path</span>`
    :(e.pages?`<span><a href='/ep/${e.b}'>cached — read now (${e.pages}p)</a> <a href='/ep/${e.b}.zip'>zip ⬇</a></span>`
     :'<span class=muted>⏳</span>');
  return `<div class=eprow id=r${i}><label style=display:flex;gap:10px;align-items:center;flex:1>
@@ -1095,7 +1146,10 @@ function statusShow(j){
  if(!s){s=document.createElement('pre');s.id='status';$('out').before(s)}
  s.style.display='block';
  const pr=j.progress||{};
- s.textContent=`⏬ ${pr.step||'…'} · ${pr.pct??''}${pr.eta_min!=null?('· ETA ~'+pr.eta_min+'m'):''}\\nworkers=${j.workers_now}/${j.max_workers||16} ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}`}
+ s.textContent=`⏬ ${pr.step||'…'} · ${pr.pct??''}${pr.eta_min!=null?('· ETA ~'+pr.eta_min+'m'):''}\\nworkers=${j.workers_now}/${j.max_workers||16} ✅${j.done_n} ⏳${j.pending_n} ❌${j.fail_n}`;
+ const bs=j.bid_status||{};
+ const pend=EPS.filter(e=>!e.pages&&!e.paid&&bs[e.b]).slice(0,4);
+ if(pend.length)s.textContent+='\\n'+pend.map(e=>`· ${(e.t||'').slice(0,28)} — ${bs[e.b]}`).join('\\n')}
 function statusHide(){const s=$('status');if(s)s.style.display='none'}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 loadLib();poolTick();poll();
@@ -1283,6 +1337,7 @@ class H(BaseHTTPRequestHandler):
                         "max_workers": j.max_workers,
                         "done_n": len(done_list), "pages": {k: v.get("pages") for k, v in j.done.items()},
                         "paid_list": sorted(j.paid),
+                        "bid_status": _bid_stage(j),
                         "pending_n": max(0, pend + fail), "fail_n": fail,
                         "progress": job_progress(j), "cache": j.cache,
                         "stream_url": j.stream_url,

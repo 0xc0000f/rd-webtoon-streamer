@@ -9,6 +9,10 @@ def STEP(msg):
     print(f"STEP {msg} (t+{time.time()-_T0:.0f}s)", flush=True)
 
 
+class ClaimEmpty(Exception):
+    pass
+
+
 _T0 = time.time()
 _LAST_PW = [""]
 
@@ -108,7 +112,7 @@ def build_account(remaining):
             print("    cookies dead → otp re-login")
             wck = F.full_login(uid, pw)
             if not wck:
-                print("    pooled login failed (mailbox likely expired)")
+                print("    [recycle] reason=pooled-login-failed (mailbox likely expired)")
                 return None
             w = requests.Session()
             w.cookies.update(wck)
@@ -122,7 +126,7 @@ def build_account(remaining):
         print(f"    claims={len(claimed)}/{len(set(remaining))}")
         if not claimed and remaining:
             print(f"    CLAIMS_EMPTY {','.join(sorted(set(remaining)))}", flush=True)
-            return None      # nothing claimable with this identity → next one
+            raise ClaimEmpty()
         return claimed, w, str(uuid.uuid4()), uid, addr
     STEP("making new email")
     addr, tok = F.tmail_new()
@@ -215,10 +219,17 @@ def main():
         apply_seed()   # rotate Databay session per attempt (bad exit IPs happen)
         print(f"[w{os.getpid() % 10000}] account #{i+1} | left={len(remaining)}", flush=True)
         signal.alarm(int(os.environ.get("STAGE_TIMEOUT", "90")))  # hard cap/identity
+        ce_hits = 0
         try:
             res = build_account(remaining)
+        except ClaimEmpty as _ce:
+            print("    [recycle] reason=claims-empty (no coupon/free path on this identity)")
+            ce_hits += 1
+            if ce_hits >= 2 or os.environ.get("FAST_NOCLAIM") == "1":
+                break
+            continue
         except StageTO:
-            print("    stage timeout (hard) — recycle identity", flush=True)
+            print("    [recycle] reason=stage-timeout (hard)")
             res = None
         except Exception as e:
             print("    err:", str(e)[:120], flush=True)
