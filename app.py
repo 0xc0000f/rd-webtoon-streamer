@@ -756,7 +756,7 @@ def lane_run(job, lane):
             job.paid |= newly_paid
             miss = [b for b in bids if str(b) not in got and str(b) not in job.paid]
             for b in miss:
-                job.tries[b] += 1
+                job.tries[b] = job.tries.get(b, 0) + 1
             if miss:
                 job.last_fail_t = time.time()
             job.failed = [b for b in dict.fromkeys(job.failed + miss)
