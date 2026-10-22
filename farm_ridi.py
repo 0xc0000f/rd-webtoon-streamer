@@ -347,9 +347,10 @@ def app_download(w, bids, outroot=None, dev=None):
             k = page_key(bid); n = 0; f = 0
 
             def _fetch(i):
-                t = "cover" if i == 0 else "content"
+                # NEVER fetch type=cover into ep zips (series banner, identical
+                # across eps — user complaint). Content pages index 0-based.
                 u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
-                     f"?page_num={i}&type={t}&quality=recommended&device_id={dev}")
+                     f"?page_num={i}&type=content&quality=recommended&device_id={dev}")
                 last = None
                 for att in range(4):
                     try:
@@ -361,16 +362,40 @@ def app_download(w, bids, outroot=None, dev=None):
                 raise last
 
             from concurrent.futures import ThreadPoolExecutor
+            missing = set()
             with ThreadPoolExecutor(PAGE_WORKERS) as pool:
                 for i, r2 in pool.map(_fetch, range(len(imgs))):
                     if r2.status_code != 200 or len(r2.content) < 300:
-                        f += 1; continue
+                        f += 1; missing.add(i); continue
                     d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
                     pt = d.update(r2.content) + d.finalize()
                     ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
-                    open(os.path.join(outdir, f"{i:03d}{ext}"), "wb").write(pt); n += 1
+                    open(os.path.join(outdir, f"{i+1:03d}{ext}"), "wb").write(pt); n += 1
         except Exception as e:
             print(f"  [dl {bid}] err {str(e)[:140]}"); continue
+        # gap-repair pass: failed slots get slow sequential retries so no page hole
+        try:
+            for i in sorted(missing):
+                u = (f"https://download.ridibooks.com/stream/books/{bid}/files"
+                     f"?page_num={i}&type=content&quality=recommended&device_id={dev}")
+                ok = False
+                for att in range(3):
+                    time.sleep(random.uniform(JIT_LO, JIT_HI))
+                    try:
+                        r2 = a.get(u, timeout=90)
+                    except requests.RequestException:
+                        continue
+                    if r2.status_code != 200 or len(r2.content) < 300:
+                        continue
+                    d = Cipher(algorithms.AES(k), modes.ECB(), backend=default_backend()).decryptor()
+                    pt = d.update(r2.content) + d.finalize()
+                    ext = ".jpg" if pt[0:3] == b"\xff\xd8\xff" else ".webp"
+                    open(os.path.join(outdir, f"{i+1:03d}{ext}"), "wb").write(pt)
+                    n += 1; ok = True; break
+                if not ok:
+                    print(f"  [gap {bid}] page_num={i} still missing", flush=True)
+        except Exception as e:
+            print(f"  [gap {bid}] err {str(e)[:120]}")
         print(f"  ✔ {bid}: {n}/{len(imgs)} pages")
         got.append({"b_id": bid, "pages": n})
     return got
