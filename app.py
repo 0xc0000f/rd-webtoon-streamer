@@ -542,7 +542,7 @@ LANE_IDX = [0]
 POOL_DIR = os.path.join(DATA_DIR, "pool")
 # unbounded identity farming (user order 2026-10-22): farm forever, staggered,
 # no ceiling — target number just has to exceed any realistic ready-count
-POOL_TARGET = int(os.environ.get("POOL_TARGET", "500"))
+POOL_TARGET = int(os.environ.get("POOL_TARGET", "3000"))
 PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "3"))
 
 
