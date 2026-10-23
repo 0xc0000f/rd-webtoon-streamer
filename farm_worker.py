@@ -171,12 +171,12 @@ def build_account(remaining):
             print(f"    CLAIMS_EMPTY {','.join(sorted(set(remaining)))}", flush=True)
             raise ClaimEmpty()
         return claimed, w, str(uuid.uuid4()), uid, addr
-    STEP("making new email")
-    addr, tok = F.tmail_new()
-    F.TMAIL_TOKEN[0] = tok
-    uid = pw = None
-    STEP("signup")
-    for attempt in range(2):
+    addr = tok = uid = pw = None
+    for attempt in range(3):
+        STEP(f"making new email ({attempt + 1}/3)")
+        addr, tok = F.tmail_new()
+        F.TMAIL_TOKEN[0] = tok
+        STEP("signup")
         try:
             uid, pw, ck0 = F.signup(addr)
             if uid:
@@ -184,6 +184,8 @@ def build_account(remaining):
                 break
         except Exception as e:
             print(f"    signup err {str(e)[:80]}")
+        if attempt < 2:
+            time.sleep(3 * (attempt + 1))
     if not uid:
         return None
     STEP("waiting verification mail")
@@ -206,7 +208,16 @@ def build_account(remaining):
         print("    activation failed")
         return None
     STEP("login + otp")
-    wck = F.full_login(uid, pw)
+    wck = None
+    for attempt in range(2):
+        try:
+            wck = F.full_login(uid, pw)
+            if wck:
+                break
+        except Exception as e:
+            print(f"    login err {str(e)[:80]}")
+        if attempt < 1:
+            time.sleep(4)
     if not wck:
         print("    login/otp failed")
         return None

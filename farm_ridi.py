@@ -259,6 +259,26 @@ def tmail_poll(token, want_otp=False):
     return ("link", fs[0].replace("&amp;", "&")) if fs else None
 
 # ---------- account creation ----------
+def _rpost(session, url, **kw):
+    for attempt in range(3):
+        try:
+            return session.post(url, **kw)
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
+def _rget(session, url, **kw):
+    for attempt in range(3):
+        try:
+            return session.get(url, **kw)
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
 def signup(addr):
     s = requests.Session()
     s.headers.update({"User-Agent": WEB_UA, "Origin": "https://ridibooks.com",
@@ -267,8 +287,8 @@ def signup(addr):
     pw = "Ridi" + "".join(random.choices(string.ascii_letters + string.digits, k=8)) + "!1"
     for path, payload in (("validation/id", {"user_id": uid}),
                           ("validation/email", {"email": addr})):
-        j = s.post(f"https://ridibooks.com/apps/frontend/v1/account/{path}",
-                   json=payload, timeout=30).json().get("data", {})
+        j = _rpost(s, f"https://ridibooks.com/apps/frontend/v1/account/{path}",
+                   json=payload, timeout=45).json().get("data", {})
         if not j.get("valid"):
             print("  validation failed:", path, (j.get("messages") or [""])[0][:50])
             return None, None, None
@@ -278,19 +298,21 @@ def signup(addr):
                "use_confirm": True, "consent_confirm": True,
                "provide_gender_and_birth_confirm": True,
                "marketing_agreement_push_confirm": False}
+    # Deliberately do NOT retry this call: a timed-out request may already have
+    # created the account, and the caller will restart with a fresh email.
     r = s.post("https://ridibooks.com/apps/frontend/v1/account/signup/create-account",
-               json=payload, timeout=40)
+               json=payload, timeout=70)
     ok = r.ok and '"valid":true' in r.text.replace(" ", "")
     if not ok:
         print("  create-account failed:", str(r.text[:120]).replace("\n", " "))
         return None, None, None
     # trigger activation mail ourselves (create-account does NOT send it)
-    g = s.get(f"https://ridibooks.com/account/email/send?return_url=%2F&email="
-              f"{requests.utils.quote(addr)}", timeout=30)
+    _rget(s, f"https://ridibooks.com/account/email/send?return_url=%2F&email="
+              f"{requests.utils.quote(addr)}", timeout=45)
     sent = False
     for attempt in range(4):
-        rr = s.post("https://ridibooks.com/apps/frontend/v1/account/verification/send-email",
-                    json={"email": addr, "return_url": "/"}, timeout=30)
+        rr = _rpost(s, "https://ridibooks.com/apps/frontend/v1/account/verification/send-email",
+                    json={"email": addr, "return_url": "/"}, timeout=45)
         j = rr.json() if rr.ok else {}
         d = j.get("data") or {}
         if d.get("valid"):
@@ -302,46 +324,58 @@ def signup(addr):
     return (uid, pw, ck) if sent and ok else (None, None, None)
 
 def activate(link):
-    s = requests.Session(); s.headers["User-Agent"] = WEB_UA
-    g = s.get(link, timeout=40, allow_redirects=True)
-    return "signup/complete" in g.url
+    try:
+        s = requests.Session(); s.headers["User-Agent"] = WEB_UA
+        g = s.get(link, timeout=60, allow_redirects=True)
+        return "signup/complete" in g.url
+    except (requests.Timeout, requests.ConnectionError) as e:
+        print("  activation request failed:", str(e)[:60])
+        return False
 
 # ---------- login + otp ----------
 def full_login(uid, pw):
-    s = requests.Session()
-    s.headers.update({"User-Agent": WEB_UA, "Referer": "https://ridibooks.com/account/login",
-                      "Origin": "https://ridibooks.com"})
-    s.get("https://ridibooks.com/account/login", timeout=30)
-    fd = {"username": uid, "password": pw, "platform_from": "web",
-          "auto_login": "false", "id_token": "", "platform": "", "user_name": ""}
-    r = s.post("https://ridibooks.com/auth/login/password", data=fd,
-               timeout=40, allow_redirects=False)
-    if not (300 <= r.status_code < 400): return None
-    loc = r.headers.get("location", "")
-    if "one-time-email" not in loc: return None
-    s.get("https://ridibooks.com" + loc if not loc.startswith("http") else loc, timeout=30)
-    sr = s.post("https://ridibooks.com/apps/books/auth/mfa/email/send", timeout=30)
-    if not sr.ok: return None
-    time.sleep(12)
-    for _ in range(10):
-        got = tmail_poll(TMAIL_TOKEN[0], want_otp=True)
-        if got:
-            code = got[1]
-            rr = s.post("https://ridibooks.com/auth/mfa/challenge",
-                        data={"method": "email_otp", "code": code,
-                              "platform_from": "web", "purpose": "login"},
-                        timeout=40, allow_redirects=False)
-            if not (300 <= rr.status_code < 400): return None
-            nloc = rr.headers["location"]
-            g2 = s.get(nloc if nloc.startswith("http") else "https://ridibooks.com" + nloc,
-                       timeout=40, allow_redirects=True)
-            ck = {c.name: c.value for c in s.cookies}
-            me = requests.Session(); me.cookies.update(ck); me.headers["User-Agent"] = WEB_UA
-            m2 = me.get("https://ridibooks.com/apps/account/accounts/me", timeout=20)
-            if '"idx"' in m2.text:
-                return ck
-        time.sleep(7)
-    return None
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": WEB_UA, "Referer": "https://ridibooks.com/account/login",
+                          "Origin": "https://ridibooks.com"})
+        _rget(s, "https://ridibooks.com/account/login", timeout=45)
+        fd = {"username": uid, "password": pw, "platform_from": "web",
+              "auto_login": "false", "id_token": "", "platform": "", "user_name": ""}
+        r = _rpost(s, "https://ridibooks.com/auth/login/password", data=fd,
+                   timeout=70, allow_redirects=False)
+        if not (300 <= r.status_code < 400):
+            return None
+        loc = r.headers.get("location", "")
+        if "one-time-email" not in loc:
+            return None
+        _rget(s, "https://ridibooks.com" + loc if not loc.startswith("http") else loc, timeout=45)
+        sr = _rpost(s, "https://ridibooks.com/apps/books/auth/mfa/email/send", timeout=45)
+        if not sr.ok:
+            return None
+        time.sleep(12)
+        for _ in range(12):
+            got = tmail_poll(TMAIL_TOKEN[0], want_otp=True)
+            if got:
+                code = got[1]
+                rr = _rpost(s, "https://ridibooks.com/auth/mfa/challenge",
+                            data={"method": "email_otp", "code": code,
+                                  "platform_from": "web", "purpose": "login"},
+                            timeout=70, allow_redirects=False)
+                if not (300 <= rr.status_code < 400):
+                    return None
+                nloc = rr.headers["location"]
+                _rget(s, nloc if nloc.startswith("http") else "https://ridibooks.com" + nloc,
+                      timeout=70, allow_redirects=True)
+                ck = {c.name: c.value for c in s.cookies}
+                me = requests.Session(); me.cookies.update(ck); me.headers["User-Agent"] = WEB_UA
+                m2 = _rget(me, "https://ridibooks.com/apps/account/accounts/me", timeout=30)
+                if '"idx"' in m2.text:
+                    return ck
+            time.sleep(7)
+        return None
+    except (requests.Timeout, requests.ConnectionError) as e:
+        print("  login network error:", str(e)[:70])
+        return None
 
 TMAIL_TOKEN = [None]
 
