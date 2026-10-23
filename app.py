@@ -546,7 +546,7 @@ POOL_DIR = os.path.join(DATA_DIR, "pool")
 # unbounded identity farming (user order 2026-10-22): farm forever, staggered,
 # no ceiling — target number just has to exceed any realistic ready-count
 POOL_TARGET = int(os.environ.get("POOL_TARGET", "3000"))
-PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "5"))
+PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "6"))
 
 
 def rotate_logs():
@@ -616,7 +616,7 @@ def prewarm_loop():
                         pass
             # adaptive cap: while pool is half-empty (post-drain burst), allow
             # extra parallel builders so refill catches up fast again
-            cap = PREWARM_CONC + (3 if n < POOL_TARGET * 0.5 else 0)
+            cap = PREWARM_CONC + (4 if n < POOL_TARGET * 0.5 else 0)
             if n < POOL_TARGET and len(busy) < cap:
                 env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR,
                            PROXY_SEED=os.urandom(4).hex(), STAGE_TIMEOUT="180",
@@ -1428,7 +1428,7 @@ class H(BaseHTTPRequestHandler):
             b = json.dumps({"ok": True,
                             "uptime_s": round(time.time() - _T0_APP),
                             "pool_ready": len(glob.glob(os.path.join(
-                                POOL_DIR, "*.json")))}) .encode()
+                                POOL_DIR, "pool_*.json")))}) .encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
