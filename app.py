@@ -1553,6 +1553,8 @@ class H(BaseHTTPRequestHandler):
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
         mr = re.match(r"^/ep/(\d+)/?$", p)
         if p == "/api/debug/uri":
+            if os.environ.get("DEBUG_URI_ENDPOINT") != "1":
+                return self._json({"ok": False, "error": "debug endpoint disabled"}, 403)
             identities = (sorted(glob.glob(os.path.join(POOL_DIR, "active_*.json"))) +
                           sorted(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))))
             if not identities:
