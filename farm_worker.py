@@ -259,7 +259,7 @@ def main():
             break
         apply_seed()   # rotate Databay session per attempt (bad exit IPs happen)
         prefer = "pool" if i >= 1 else "active"   # virgin coupons on retry — PAID needs them
-        if REUSE_ACCT and not os.path.exists(REUSE_ACCT):
+        if (not REUSE_ACCT or not os.path.exists(REUSE_ACCT)) and POOL_DIR:
             acct_j, newpth = _pop_identity(prefer)
             if acct_j:
                 os.environ["REUSE_ACCT"] = REUSE_ACCT = newpth
@@ -271,24 +271,38 @@ def main():
         print(f"[w{os.getpid() % 10000}] account #{i+1} | left={len(remaining)}", flush=True)
         signal.alarm(int(os.environ.get("STAGE_TIMEOUT", "90")))  # hard cap/identity
         ce_hits = 0
+        def retire_reused_identity():
+            global REUSE_ACCT
+            if REUSE_ACCT:
+                try:
+                    os.remove(REUSE_ACCT)
+                except OSError:
+                    pass
+                print("    [identity] retired unusable pooled identity", flush=True)
+                REUSE_ACCT = ""
+
         try:
             res = build_account(remaining)
         except ClaimEmpty as _ce:
             print("    [recycle] reason=claims-empty (no coupon/free path on this identity)")
+            retire_reused_identity()
             ce_hits += 1
             if ce_hits >= 2 or os.environ.get("FAST_NOCLAIM") == "1":
                 break
             continue
         except StageTO:
             print("    [recycle] reason=stage-timeout (hard)")
+            retire_reused_identity()
             res = None
         except Exception as e:
             print("    err:", str(e)[:120], flush=True)
+            retire_reused_identity()
             res = None
         finally:
             signal.alarm(0)
         if res is None:
             id_fail += 1
+            retire_reused_identity()
             if id_fail >= 3:      # provider/proxy likely down → cool off
                 print("    cooling 45s (mail/prox circuit)", flush=True)
                 time.sleep(45)
