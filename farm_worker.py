@@ -1,6 +1,6 @@
 # farm_worker.py — single-thread account builder (one process = one isolated identity)
 # usage: python3 farm_worker.py <state_file> <out_root> <b_id> [<b_id>...]
-import sys, os, json, time, glob
+import sys, os, json, time, glob, atexit, threading
 import random
 import requests, uuid
 
@@ -15,6 +15,35 @@ class ClaimEmpty(Exception):
 
 _T0 = time.time()
 _LAST_PW = [""]
+_PRE_BUSY = os.environ.get("PRE_BUSY", "")
+
+
+def _touch_pre_busy():
+    if _PRE_BUSY:
+        try:
+            os.utime(_PRE_BUSY, None)
+        except OSError:
+            pass
+
+
+def _remove_pre_busy():
+    if _PRE_BUSY:
+        try:
+            os.remove(_PRE_BUSY)
+        except OSError:
+            pass
+
+
+def _pre_busy_beat():
+    while True:
+        _touch_pre_busy()
+        time.sleep(15)
+
+
+if _PRE_BUSY:
+    atexit.register(_remove_pre_busy)
+    threading.Thread(target=_pre_busy_beat, daemon=True).start()
+    _touch_pre_busy()
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
 PROXY = None

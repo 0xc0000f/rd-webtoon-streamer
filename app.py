@@ -546,7 +546,7 @@ POOL_DIR = os.path.join(DATA_DIR, "pool")
 # unbounded identity farming (user order 2026-10-22): farm forever, staggered,
 # no ceiling — target number just has to exceed any realistic ready-count
 POOL_TARGET = int(os.environ.get("POOL_TARGET", "3000"))
-PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "3"))
+PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "5"))
 
 
 def rotate_logs():
@@ -607,31 +607,40 @@ def prewarm_loop():
         try:
             n = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
             busy = [f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
-                    if time.time() - os.path.getmtime(f) < 260]
+                    if time.time() - os.path.getmtime(f) < 120]
             for f in glob.glob(os.path.join(POOL_DIR, "*.busy")):
-                if time.time() - os.path.getmtime(f) > 270:
+                if time.time() - os.path.getmtime(f) > 180:
                     try:
                         os.remove(f)
                     except OSError:
                         pass
             # adaptive cap: while pool is half-empty (post-drain burst), allow
             # extra parallel builders so refill catches up fast again
-            cap = PREWARM_CONC + (2 if n < POOL_TARGET * 0.5 else 0)
+            cap = PREWARM_CONC + (3 if n < POOL_TARGET * 0.5 else 0)
             if n < POOL_TARGET and len(busy) < cap:
                 env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR,
                            PROXY_SEED=os.urandom(4).hex(),
                            STAGGER=str(random.randint(0, 35)))
                 try:
                     os.makedirs(POOL_DIR, exist_ok=True)
-                    open(os.path.join(
-                        POOL_DIR, f"pre_{int(time.time()*1000)}.busy"), "w").close()
-                    subprocess.Popen(
-                        [sys.executable, WORKER,
-                         os.path.join(DATA_DIR, "pre.state.json"), DATA_DIR],
-                        stdout=open(os.path.join(POOL_DIR, "pre.log"), "ab"),
-                        stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
+                    busy_path = os.path.join(
+                        POOL_DIR, f"pre_{int(time.time()*1000)}.busy")
+                    open(busy_path, "w").close()
+                    env["PRE_BUSY"] = busy_path
+                    logf = open(os.path.join(POOL_DIR, "pre.log"), "ab")
+                    try:
+                        subprocess.Popen(
+                            [sys.executable, WORKER,
+                             os.path.join(DATA_DIR, "pre.state.json"), DATA_DIR],
+                            stdout=logf, stderr=subprocess.STDOUT,
+                            cwd=APP_ROOT, env=env)
+                    finally:
+                        logf.close()
                 except Exception:
-                    pass
+                    try:
+                        os.remove(busy_path)
+                    except OSError:
+                        pass
         except Exception:
             pass
         time.sleep(18)
@@ -1504,6 +1513,27 @@ class H(BaseHTTPRequestHandler):
                              f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
             self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
             return
+        if p == "/api/lanes":
+            def tail_file(path, size):
+                try:
+                    with open(path, "rb") as fh:
+                        fh.seek(max(0, os.path.getsize(path) - size))
+                        text = fh.read().decode(errors="ignore")
+                    lines = text.splitlines()[-30:]
+                    return {"age_s": round(time.time() - os.path.getmtime(path)),
+                            "bytes": os.path.getsize(path),
+                            "tail": lines}
+                except OSError as e:
+                    return {"error": str(e)[:160]}
+            lanes = []
+            with JOB.lock:
+                live = list(JOB.lanes)
+            for l in live:
+                out = l.get("outroot") or ""
+                lanes.append({"pid": l.get("pid"), "outroot": out,
+                              "log": tail_file(os.path.join(out, "lane.log"), 8000)})
+            return self._json({"lanes": lanes,
+                               "prewarm": tail_file(os.path.join(POOL_DIR, "pre.log"), 12000)})
         if p == "/api/pool":
             ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
             busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
