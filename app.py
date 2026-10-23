@@ -28,6 +28,21 @@ def disk_pct_of(path):
     u = shutil.disk_usage(path)
     return round(u.used * 100 / max(u.total, 1), 1)
 
+
+def purge_transient_downloads():
+    """Default mode delivers zips to the browser; stale lane/result copies must
+    not accumulate on the server across restarts."""
+    for d in DL_DIRS + [os.path.join(DATA_DIR, "dl"), os.path.join(DATA_DIR, "zips")]:
+        shutil.rmtree(d, ignore_errors=True)
+    for d in DL_DIRS:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+
+
+purge_transient_downloads()
+
 # ---------------- server library (/app/data/library/<series>/<NNN>-<slug>) --------
 def _page_sort_key(f):
     m = re.search(r"(\d+)", os.path.basename(f))
@@ -1407,6 +1422,11 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/delete":
             n = delete_library(bids=data.get("bids"), series=data.get("series"))
             self._json({"deleted": n})
+        elif p == "/api/clean":
+            if JOB and JOB.alive:
+                return self._json({"ok": False, "error": "download job still running"}, 409)
+            purge_transient_downloads()
+            self._json({"ok": True})
         elif p == "/api/stop":
             j = JOB
             if j and j.alive:
