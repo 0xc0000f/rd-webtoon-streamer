@@ -1274,7 +1274,7 @@ function home(){$('out').innerHTML='<h3>…</h3>';$('actionbar').style.display='
  clearInterval(POLLT);POLLT=null;$('pbar').style.display='none';$('wlab').textContent='idle'}
 function status(t){const s=$('status')||null}
 function poll(force){
- if(POLLT&&!force)return; if(!POLLT)POLLT=setInterval(()=>poll(),4000);
+ if(POLLT&&!force)return; if(!POLLT)POLLT=setInterval(()=>poll(true),4000);
  fetch('/api/job').then(r=>r.json()).then(j=>{
   const tot=j.done_n+j.pending_n;
   const pr=j.progress||{};
