@@ -3,6 +3,7 @@
 # Flow: search by title -> grid pick -> episode list -> select & download
 # (live progress + AIMD workers) -> read online or export .zip
 import os, re, json, glob, time, threading, subprocess, sys, tempfile, zipfile, html, urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", 3000))
@@ -17,9 +18,13 @@ LIB_DIR = os.path.join(DATA_DIR, "library")
 os.makedirs(LIB_DIR, exist_ok=True)
 SETTINGS_F = os.path.join(DATA_DIR, "settings.json")
 WORKER = os.path.join(APP_ROOT, "farm_worker.py")
-CACHE_DIR = os.path.join(APP_ROOT, "cache_series")
+CACHE_DIR = os.path.join(DATA_DIR, "cache_series")
 TITLES_CACHE = os.path.join(CACHE_DIR, "ep_titles.json")
+LEGACY_CACHE_DIR = os.path.join(APP_ROOT, "cache_series")
 os.makedirs(CACHE_DIR, exist_ok=True)
+if os.path.isdir(LEGACY_CACHE_DIR):
+    shutil.copytree(LEGACY_CACHE_DIR, CACHE_DIR, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("*.tmp"))
 
 import shutil
 
@@ -218,8 +223,8 @@ threading.Thread(target=sweep_loop, daemon=True).start()
 # ---------------- upstream clients ----------------
 import requests
 
-SREQ = requests.Session()
-SREQ.headers["User-Agent"] = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36"
+_UA = ("Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 "
+       "Chrome/126 Mobile Safari/537.36")
 SEARCH_API = "https://search-api.ridibooks.com/search"
 BOOK_API = "https://book-api.ridibooks.com/books/"
 
@@ -234,9 +239,10 @@ def _uproxies():
 
 
 def sget(url, timeout=25, **kw):
-    """direct first; CF-block/network error → retry via Databay proxy"""
+    """thread-safe direct first; CF-block/network error → retry via Databay proxy"""
+    headers = {"User-Agent": _UA}
     try:
-        r = SREQ.get(url, timeout=timeout, **kw)
+        r = requests.get(url, headers=headers, timeout=timeout, **kw)
         if r.status_code == 403 and _uproxies():
             raise RuntimeError("cf-403")
         return r
@@ -244,8 +250,10 @@ def sget(url, timeout=25, **kw):
         px = _uproxies()
         if not px:
             raise
-        kw.setdefault("proxies", px)
-        return SREQ.get(url, timeout=timeout, **kw)
+        kw.pop("headers", None)
+        kw.pop("proxies", None)
+        return requests.get(url, headers=headers, timeout=timeout,
+                            proxies=px, **kw)
 
 
 def search_titles(q):
@@ -423,13 +431,81 @@ def ep_title(bid, meta=None):
     return "ep " + bid
 
 
+def _book_meta_safe(b):
+    try:
+        return b, book_meta(b)
+    except Exception:
+        return b, None
+
+
+def _collect_series_ids(root, expect):
+    ids = {root}
+    flags = {}
+    titles = {}
+    pending = {root}
+    failures = {}
+    guard = 0
+    limit = max(expect * 4 + 40, 60)
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        while pending and guard < limit:
+            batch = list(pending)[:30]
+            pending.clear()
+            guard += len(batch)
+            futures = {ex.submit(_book_meta_safe, b): b for b in batch}
+            for fut in as_completed(futures):
+                b, jn = fut.result()
+                if jn is None:
+                    failures[b] = failures.get(b, 0) + 1
+                    if failures[b] < 2:
+                        pending.add(b)
+                    continue
+                s = jn.get("series") or {}
+                prop = s.get("property") or {}
+                t = (prop.get("title") or jn.get("title") or "").strip()
+                if t and re.search(r"\d+\s*(?:화|회|권)", t):
+                    titles[b] = t
+                for n, opened in neighbors(jn):
+                    flags.setdefault(n, opened)
+                    if n not in ids:
+                        ids.add(n)
+                        pending.add(n)
+                if expect and len(ids) >= expect:
+                    break
+            if expect and len(ids) >= expect:
+                break
+    return sorted(ids, key=int), flags, titles
+
+
+def _resolve_cache_read(root, expect):
+    """Return (order, titles) from a compatible cache, or (None, None)."""
+    for name, expected_list in (
+            (root + ".v4.json", False),
+            (root + ".v3.json", True),
+            (root + ".v2.json", True)):
+        fp = os.path.join(CACHE_DIR, name)
+        if not os.path.exists(fp):
+            continue
+        try:
+            j = json.load(open(fp))
+            order = j if expected_list else (j.get("order") or [])
+            titles = {} if expected_list else (j.get("titles") or {})
+            if len(order) >= max(expect, 1):
+                return order, titles
+        except Exception:
+            pass
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
+    return None, None
+
+
 def resolve(query):
     m = re.search(r"(\d{6,})", str(query))
     if not m:
         return []
     start = m.group(1)
     root, expect = start, 0
-    ttl_title = ""
     try:
         j = book_meta(start)
         s = j.get("series") or {}
@@ -438,63 +514,32 @@ def resolve(query):
         expect = int(prop.get("total_book_count")
                      or prop.get("opened_book_count")
                      or s.get("volume") or 0)
-        ttl_title = prop.get("title") or ""
     except Exception:
         pass
-    cf = os.path.join(CACHE_DIR, root + ".v2.json")   # v2: is_open-filtered lists
-    if os.path.exists(cf):
-        cached = json.load(open(cf))
-        # never serve a truncated cache when we know the series is bigger
-        if len(cached) >= max(expect, 1):
-            return cached
-        os.remove(cf)
-    ids = {root}
-    flags = {}          # bid -> is_opened (only entries RIDI explicitly marks)
-    frontier = [root]
-    guard = 0
-    while frontier and (guard < expect * 3 + 30):
-        guard += 1
-        b = frontier.pop()
-        try:
-            jn = book_meta(b)
-        except Exception:
-            continue
-        for n, opened in neighbors(jn):
-            flags.setdefault(n, opened)
-            if n not in ids:
-                ids.add(n); frontier.append(n)
-        time.sleep(0.12)
-        if expect and len(ids) >= expect:
-            break
-    order = sorted(ids, key=int)
-    if expect > 2 and len(order) < expect:   # flaky upstream → one retry pass
-        ids |= set(order)
-        frontier = list(order)[::-1]
-        guard = 0
-        while frontier and guard < expect * 3 + 30:
-            guard += 1
-            b = frontier.pop()
-            try:
-                nb = [(n, o) for n, o in neighbors(book_meta(b))]
-            except Exception:
-                continue
-            for n, opened in nb:
-                flags.setdefault(n, opened)
-                if n not in ids:
-                    ids.add(n); frontier.append(n)
-            time.sleep(0.12)
-            if len(ids) >= expect:
-                break
-        order = sorted(ids, key=int)
+    cached_order, cached_titles = _resolve_cache_read(root, expect)
+    if cached_order is not None:
+        if cached_titles:
+            merged = dict(load_titles())
+            merged.update({k: v for k, v in cached_titles.items() if v})
+            save_titles(merged)
+        return cached_order
+    order, flags, ep_titles = _collect_series_ids(root, expect)
     # hide unreleased eps (property.is_open == False) — RIDI payment route 400s them
     hidden = [b for b, o in flags.items() if o is False and b != root]
     order = [b for b in order if flags.get(b, True)]
     if hidden:
         print(f"    [resolve] hid {len(hidden)} unreleased ep(s): {hidden[:6]}",
               flush=True)
+    merged = dict(load_titles())
+    merged.update({k: v for k, v in ep_titles.items() if v})
+    save_titles(merged)
     if expect > 2 and len(order) < expect:
         return order                          # do NOT cache truncated result
-    json.dump(order, open(cf, "w"))
+    cf = os.path.join(CACHE_DIR, root + ".v4.json")
+    tmp = cf + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump({"order": order, "titles": ep_titles}, fh)
+    os.replace(tmp, cf)
     return order
 
 
