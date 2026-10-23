@@ -1012,6 +1012,11 @@ def _bid_stage(j):
 
 def package_on_finish(job):
     """cache → library layout; default (no-cache) → stage stream zip for clicker"""
+    with job.lock:
+        if job.packaged:
+            return
+        job.packaged = True
+
     def _w():
         try:
             done_bids = list(job.done)   # GIL-safe snapshot, no lock needed
