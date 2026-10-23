@@ -272,14 +272,15 @@ def tmail_poll(token, want_otp=False):
         return _mtm_poll(token, want_otp)
     if token.startswith("tmio:"):
         return _tmio_poll(token, want_otp)
-    for _t in range(5):
+    for _t in range(8):
         try:
             r = requests.get(f"https://api.tempmail.lol/auth/{token}",
-                             headers={"User-Agent": WEB_UA}, timeout=30)
+                             headers={"User-Agent": WEB_UA}, timeout=45)
             j = r.json()
             break
         except Exception as e:
-            print("  [tmail retry]", str(e)[:80]); time.sleep(20)
+            print("  [tmail retry]", str(e)[:80])
+            time.sleep(3 + random.uniform(0, 2))
     else:
         return None
     ms = j.get("email") or []
@@ -480,12 +481,42 @@ JIT_LO, JIT_HI = (lambda a, b: (a, b))(
     *(float(x) for x in os.environ.get("PAGE_JITTER", "0.3-1.2").split("-", 1)))
 
 
+def _session_json(session, method, url, tries=3, timeout=20, **kw):
+    for attempt in range(tries):
+        try:
+            r = getattr(session, method)(url, timeout=timeout, **kw)
+            if r.status_code != 200:
+                print(f"  [ridi json retry] {r.status_code} {url.split('/')[3]} "
+                      f"{(r.text or '')[:90]}")
+            else:
+                try:
+                    return r.json()
+                except ValueError:
+                    print(f"  [ridi json retry] non-json {url.split('/')[3]} "
+                          f"{(r.text or '')[:90]}")
+        except requests.RequestException as e:
+            print(f"  [ridi json retry] {type(e).__name__} {str(e)[:80]}")
+        time.sleep(2 * (attempt + 1))
+    return None
+
+
 def app_download(w, bids, outroot=None, dev=None):
     outroot = outroot or f"{R}/dl_farm"
-    leak = w.get("https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
-                 timeout=20).json()["uri_scheme"]
-    otp = w.post("https://account.ridibooks.com/sso/otp",
-                 json={"sso_otp": leak.split("sso_otp=")[-1]}, timeout=20).json()["otp"]
+    if not bids:
+        return []
+    leak_j = _session_json(w, "get",
+        "https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
+        tries=3, timeout=30)
+    leak = (leak_j or {}).get("uri_scheme") or ""
+    if "sso_otp=" not in leak:
+        print("  [app auth] no sso_otp in purchased-list uri_scheme")
+        return []
+    otp_j = _session_json(w, "post", "https://account.ridibooks.com/sso/otp",
+                          tries=3, timeout=30, json={"sso_otp": leak.split("sso_otp=")[-1]})
+    otp = (otp_j or {}).get("otp")
+    if not otp:
+        print("  [app auth] OTP exchange failed")
+        return []
     a = requests.Session(); a.headers["User-Agent"] = APP_UA
     rr = a.get(f"https://account.ridibooks.com/sso/login?otp={otp}&device_id={dev}",
                allow_redirects=False, timeout=25)
@@ -499,11 +530,13 @@ def app_download(w, bids, outroot=None, dev=None):
     got = []
     for bid in bids:
         try:
-            meta = a.get(f"https://download.ridibooks.com/stream/books/{bid}/files/metadata"
-                         f"?device_id={dev}&quality=recommended", timeout=30)
-            if meta.status_code != 200:
-                print(f"  [meta {bid}] {meta.status_code}"); continue
-            imgs = (meta.json().get("content_images") or [])
+            meta = _session_json(a, "get",
+                f"https://download.ridibooks.com/stream/books/{bid}/files/metadata"
+                f"?device_id={dev}&quality=recommended",
+                tries=3, timeout=30)
+            if meta is None:
+                print(f"  [meta {bid}] unavailable"); continue
+            imgs = (meta.get("content_images") or [])
             outdir = os.path.join(outroot, bid); os.makedirs(outdir, exist_ok=True)
             k = page_key(bid); n = 0; f = 0
 

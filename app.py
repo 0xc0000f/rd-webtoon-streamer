@@ -568,8 +568,13 @@ class Job:
         self.stream_tok = _u.uuid4().hex[:12]
         self.stream_url = None
         pool_n = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
-        base = min(MAX_WORKERS, 4 if pool_n >= 3 else 2)
-        self.workers_target = max(base, 1)
+        if pool_n >= max(3, len(bids)):
+            cap = min(MAX_WORKERS, 10)
+        elif pool_n >= 3:
+            cap = min(MAX_WORKERS, 6)
+        else:
+            cap = min(MAX_WORKERS, 2)
+        self.workers_target = max(1, min(max(len(bids), 1), cap))
         self.pending = list(self.all)
         self.done = {}
         self.failed = []
@@ -581,9 +586,9 @@ class Job:
         self.log = []
         self.lock = threading.RLock()
         self.lanes = []
-        self.workers_target = 2
         self.max_workers = MAX_WORKERS
-        self.min_workers = 1
+        self.initial_workers = self.workers_target
+        self.min_workers = max(1, min(2, self.initial_workers))
         self.history = []
         self.alive = True
         self.packaged = False
@@ -868,9 +873,10 @@ def aimd_supervisor(job):
                 n_lanes = len(job.lanes)
                 target = job.workers_target
                 have_work = bool(job.pending)
-            recent = list(job.history[-3:])
+            recent = list(job.history[-4:])
             now = time.time()
-            if len(recent) == 3 and all(recent) and now - last_scale > 20:
+            failures = sum(1 for x in recent if not x)
+            if len(recent) == 4 and failures == 0 and now - last_scale > 20:
                 increased = False
                 with job.lock:
                     if job.workers_target < job.max_workers:
@@ -879,10 +885,10 @@ def aimd_supervisor(job):
                 if increased:
                     job.logf(f"AIMD additive increase → workers={job.workers_target}")
                 last_scale = now
-            elif any(not x for x in recent) and now - last_scale > 30:
+            elif failures >= 2 and now - last_scale > 45:
                 new_target = None
                 with job.lock:
-                    nt = max(job.min_workers, int(job.workers_target * 0.5))
+                    nt = max(job.min_workers, int(job.workers_target * 0.7) or 1)
                     if nt != job.workers_target:
                         job.workers_target = nt
                         new_target = nt
@@ -1181,6 +1187,9 @@ border-radius:10px;padding:8px 12px;margin:10px auto;max-width:900px;display:non
 .cep a{color:#9cf;text-decoration:none;font-size:12px;white-space:nowrap}
 .dbtn{background:#3a2f35;border:1px solid #55404a;color:#ffb3c8;padding:6px 10px;border-radius:8px;
 font-size:12px;cursor:pointer}
+#resultbox{background:#172a1d;border:1px solid #2e5838}
+#resultbox a{background:#244a2e;border:1px solid #487b55;color:#d8ffd8;padding:7px 12px;border-radius:8px;
+text-decoration:none;font-weight:700}
 select,input[type=number]{background:var(--card);border:1px solid var(--line);color:#eee;
 padding:7px 10px;border-radius:8px;font-size:13px}
 </style></head><body>
@@ -1190,6 +1199,7 @@ padding:7px 10px;border-radius:8px;font-size:13px}
 <button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span>
 <span class=pill id=poolpill style=color:#ffd479>identity pool …</span></header>
 <main id=out></main>
+<section class=cachewrap id=resultbox style=display:none></section>
 <section class=cachewrap id=cache></section>
 <div id=actionbar></div>
 <script>
@@ -1211,7 +1221,7 @@ function renderGrid(q){
  $('actionbar').style.display='none'}
 async function openByQuery(q){$('out').innerHTML='<h3>โหลดรายการตอน…</h3>';
  const r=await fetch('/api/fetch',{method:'POST',body:JSON.stringify({q})});const j=await r.json();
- if(j.error)return $('out').innerHTML='<p class=muted>'+esc(j.error)+'</p>';EPS=j.eps;CUR=j;
+ if(j.error)return $('out').innerHTML='<p class=muted>'+esc(j.error)+'</p>';EPS=j.eps;CUR=Object.assign({q},j);
  SEL=new Set();renderEps()}
 function openTitle(sid){openByQuery(sid)}
 function renderEps(){
@@ -1243,6 +1253,13 @@ function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b);
 function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)});renderEps()}
 let DL_BIDS=[],STREAMED=false;
 function clickA(href){const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),400)}
+function showResult(j){
+ const b=$('resultbox');if(!b)return;
+ if(!j.stream_url){b.style.display='none';b.innerHTML='';return}
+ const note=j.cache?'เก็บเข้า server cache แล้ว':'ไม่เก็บไฟล์บน server · ZIP พร้อมโหลดภายใน 30 นาที';
+ b.innerHTML=`<h3>✅ โหลดเสร็จแล้ว <span class=muted>(${j.done_n} ตอน)</span></h3>
+  <p><a href='${j.stream_url}' download>📦 โหลด zip เข้าเครื่อง</a> <span class=muted>${note}</span></p>`;
+ b.style.display='block'}
 const CK=()=>$('cacheck')?$('cacheck').checked:false;
 async function dlSelected(){
  const missing=[...SEL].filter(b=>!EPS.find(e=>e.b===b&&e.pages));
@@ -1277,12 +1294,13 @@ function poll(force){
    if(j.done_list.includes(e.b)&&!e.pages){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
     const row=$('r'+i);if(row)row.outerHTML=rowHTML(e,i,true)}});
-  if(j.pool_ready!=null)$('poolpill').textContent=`identity pool ${j.pool_ready}/${j.pool_target}`;
-  if(changed&&CUR)renderEps();
-  if(!j.active&&tot){
-   clearInterval(POLLT);POLLT=null;if(CUR)renderEps();statusHide();
-   if((DL_BIDS||[]).length&&!STREAMED&&j.stream_url){STREAMED=true;clickA(j.stream_url)}
-   DL_BIDS=[];loadLib()}
+   if(j.pool_ready!=null)$('poolpill').textContent=`identity pool ${j.pool_ready}/${j.pool_target}`;
+   showResult(j);
+   if(changed&&CUR)renderEps();
+   if(!j.active&&tot){
+    clearInterval(POLLT);POLLT=null;statusHide();
+    if((DL_BIDS||[]).length&&!STREAMED&&j.stream_url){STREAMED=true;clickA(j.stream_url)}
+    DL_BIDS=[];loadLib();if(!j.cache&&CUR&&CUR.q)openByQuery(CUR.q)}
  }).catch(()=>{})}
 async function poolTick(){
  try{const r=await fetch('/api/pool');const j=await r.json();
