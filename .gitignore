@@ -1,3 +1,2 @@
-zips/
-w*/
-*.state.json
+__pycache__/
+*.pyc

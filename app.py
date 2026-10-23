@@ -663,6 +663,55 @@ def spawn_pre(delay=0):   # legacy shim — prewarm_loop owns refill now
     pass
 
 
+PREWARM_ERR_PATTERNS = {
+    "signup": ("signup err", "create-account failed", "validation failed"),
+    "activation": ("activation failed", "activation request failed"),
+    "login": ("login err", "login/otp failed", "login network error",
+              "OTP exchange failed"),
+    "adult": ("adult verify failed", "adult verify err", "adult-verify-failed"),
+    "network": ("Response ended prematurely", "Temporary failure",
+                "Connection reset"),
+    "other": ("err:", "account error:"),
+}
+
+
+def prewarm_health(window_bytes=400_000):
+    """summarize recent prewarm outcomes from POOL_DIR/pre.log (no secrets)."""
+    path = os.path.join(POOL_DIR, "pre.log")
+    errors = {k: 0 for k in PREWARM_ERR_PATTERNS}
+    out = {"ready": len(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))),
+           "building": len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                            if time.time() - os.path.getmtime(f) < 240]),
+           "target": POOL_TARGET, "conc": PREWARM_CONC,
+           "log_bytes": 0, "log_age_s": None, "scanned_bytes": 0,
+           "success_recent": 0, "stall_retries": 0, "errors_recent": errors,
+           "error_rate": None}
+    try:
+        size = os.path.getsize(path)
+        out.update(log_bytes=size,
+                   log_age_s=round(time.time() - os.path.getmtime(path), 1))
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - window_bytes))
+            raw = fh.read()
+        out["scanned_bytes"] = len(raw)
+        for line in raw.decode("utf8", "ignore").splitlines():
+            if "[pool] saved" in line:
+                out["success_recent"] += 1
+                continue
+            if "adult verify retry" in line:
+                out["stall_retries"] += 1
+            for kind, pats in PREWARM_ERR_PATTERNS.items():
+                if any(pat in line for pat in pats):
+                    errors[kind] += 1
+                    break
+        attempts = out["success_recent"] + sum(errors.values())
+        if attempts:
+            out["error_rate"] = round(sum(errors.values()) / attempts, 3)
+    except OSError as e:
+        out["error"] = str(e)[:120]
+    return out
+
+
 def prewarm_loop():
     """continuous staggered identity farming — keep ≥POOL_TARGET ready 24/7,
     ≤PREWARM_CONC builds at once, each on its own Databay session/IP, jittered start"""
@@ -1509,6 +1558,42 @@ class H(BaseHTTPRequestHandler):
         else:
             self._json({}, 404)
 
+    def do_HEAD(self):
+        p = urllib.parse.urlparse(self.path).path
+        if p == "/healthz":
+            b = json.dumps({"ok": True,
+                            "uptime_s": round(time.time() - _T0_APP),
+                            "pool_ready": len(glob.glob(os.path.join(
+                                POOL_DIR, "pool_*.json")))}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); return
+        if not check_auth(self):
+            return
+        m = re.match(r"^/ep/(\d+)\.zip$", p)
+        if m:
+            pages = find_pages(m.group(1))
+            if not pages:
+                b = b"not downloaded yet"
+                self.send_response(404); self.send_header("Content-Length", str(len(b))); self.end_headers(); return
+            name, folder = ep_label(m.group(1))
+            slug = re.sub(r"[^A-Za-z0-9가-힣ㄱ-ㅎㅏ-ㅣ._ -]", "", folder)[:80].strip() or ("EP" + m.group(1))
+            fn = urllib.parse.quote(slug + ".zip")
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", folder)[:70].strip() or ("EP" + m.group(1))
+            zp = os.path.join(DATA_DIR, "zips"); os.makedirs(zp, exist_ok=True)
+            zf = os.path.join(zp, fn[:60] + "_" + m.group(1) + ".zip")
+            with zipfile.ZipFile(zf, "w") as z:
+                for f in pages:
+                    z.write(f, arcname=f"{folder}/{os.path.basename(f)}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
+            self.send_header("Content-Length", str(os.path.getsize(zf)))
+            self.end_headers(); return
+        self.send_response(405); self.send_header("Content-Length", "0"); self.end_headers()
+
     def do_GET(self):
         p0 = urllib.parse.urlparse(self.path).path
         if p0 == "/healthz":      # container self-run health probe (agent-free ops)
@@ -1660,6 +1745,8 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ready": ready, "refilling": busy,
                                "target": POOL_TARGET, "eta_s": eta,
                                "unbounded": POOL_TARGET >= 100})
+        if p == "/api/pool/health":
+            return self._json(prewarm_health())
         if p == "/api/library":
             idx = lib_scan()
             series = {}
