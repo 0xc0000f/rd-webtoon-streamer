@@ -1551,6 +1551,26 @@ class H(BaseHTTPRequestHandler):
             return
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
         mr = re.match(r"^/ep/(\d+)/?$", p)
+        if p == "/api/debug/uri":
+            identities = sorted(glob.glob(os.path.join(POOL_DIR, "*.json")))
+            if not identities:
+                return self._json({"error": "no pooled identity"})
+            ident = identities[0]
+            env = os.environ.copy()
+            env.update({"REUSE_ACCT": ident, "DEBUG_URI": "1"})
+            try:
+                proc = subprocess.run(
+                    [sys.executable, WORKER, os.path.join(DATA_DIR, "debug_uri.json"),
+                     DATA_DIR], env=env, timeout=90,
+                    capture_output=True, text=True)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "timeout"})
+            try:
+                payload = json.loads(proc.stdout.strip().splitlines()[-1])
+            except Exception:
+                payload = {"stdout": proc.stdout[-500:], "stderr": proc.stderr[-500:]}
+            payload["identity"] = os.path.basename(ident)
+            return self._json(payload)
         if p.startswith("/api/job"):
             j = JOB
             if not j:

@@ -280,6 +280,38 @@ def main():
         except Exception:
             pass
 
+    if os.environ.get("DEBUG_URI") == "1" and REUSE_ACCT:
+        out = {}
+        try:
+            ident = json.load(open(REUSE_ACCT))
+            w = requests.Session()
+            w.headers["User-Agent"] = F.WEB_UA
+            w.cookies.update(ident.get("cookies") or {})
+            me = w.get("https://ridibooks.com/apps/account/accounts/me", timeout=25)
+            out["me_status"] = me.status_code
+            variants = [
+                ("plain", {}),
+                ("ajax", {"Accept": "application/json",
+                           "X-Requested-With": "XMLHttpRequest",
+                           "Referer": "https://ridibooks.com/library"}),
+                ("app_ua", {"Accept": "application/json",
+                             "X-Requested-With": "XMLHttpRequest",
+                             "User-Agent": F.APP_UA}),
+            ]
+            for name, hdrs in variants:
+                try:
+                    rr = w.get("https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
+                               headers=hdrs, timeout=25)
+                    out[name] = {"status": rr.status_code,
+                                 "ctype": rr.headers.get("content-type", ""),
+                                 "head": (rr.text or "")[:300]}
+                except Exception as e:
+                    out[name] = {"error": str(e)[:160]}
+        except Exception as e:
+            out["error"] = str(e)[:200]
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+        return
+
     if os.environ.get("PREWARM") and POOL_DIR:  # identity-only run → pool file
         print(f"[w{os.getpid()%10000}] prewarm account", flush=True)
         try:
