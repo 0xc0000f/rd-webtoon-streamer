@@ -504,10 +504,18 @@ def app_download(w, bids, outroot=None, dev=None):
     outroot = outroot or f"{R}/dl_farm"
     if not bids:
         return []
-    leak_j = _session_json(w, "get",
-        "https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
-        tries=3, timeout=30)
-    leak = (leak_j or {}).get("uri_scheme") or ""
+    leak_j = _session_json(w, "post",
+        "https://ridibooks.com/api/user_books/trigger_download",
+        tries=3, timeout=30,
+        json={"b_ids": [str(x) for x in bids], "preprocess": True},
+        headers={"Origin": "https://ridibooks.com",
+                 "Referer": "https://ridibooks.com/library"})
+    leak = (leak_j or {}).get("url") or (leak_j or {}).get("uri_scheme") or ""
+    if "sso_otp=" not in leak:
+        legacy = _session_json(w, "get",
+            "https://ridibooks.com/library/get-app-purchased-list-uri-scheme",
+            tries=2, timeout=30)
+        leak = (legacy or {}).get("uri_scheme") or ""
     if "sso_otp=" not in leak:
         print("  [app auth] no sso_otp in purchased-list uri_scheme")
         return []

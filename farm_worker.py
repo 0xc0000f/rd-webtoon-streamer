@@ -47,22 +47,28 @@ if _PRE_BUSY:
 
 # optional egress proxy (Databay etc): set RIDI_PROXY=http://user:pass@host:port
 PROXY = None
+PROXY_SEED = None
 STAGGER = float(os.environ.get("STAGGER", "0") or 0)
 
 
-def apply_seed():
-    """fresh Databay session suffix per identity attempt → new exit IP"""
-    global PROXY
+def _proxy_for_seed(seed):
     base = os.environ.get("RIDI_PROXY", "").strip()
     for pre in ("http://", "https://"):
         if base.startswith(pre):
             base = base[len(pre):]
     if not base or "@" not in base:
-        return
-    seed = os.urandom(4).hex()
+        return None
     head, _, tail = base.partition("@")
     user, _, pw = head.rpartition(":")
-    PROXY = f"http://{user}-session-{seed}:{pw}@{tail}"
+    return f"http://{user}-session-{seed}:{pw}@{tail}"
+
+
+def apply_seed(seed=None):
+    """use/sticky Databay session suffix; fresh random suffix when seed is absent"""
+    global PROXY, PROXY_SEED
+    seed = seed or os.urandom(4).hex()
+    PROXY_SEED = seed
+    PROXY = _proxy_for_seed(seed)
 
 
 apply_seed()
@@ -109,6 +115,7 @@ def _persist_pool(w, uid, pw, addr, tok):
     p = os.path.join(POOL_DIR, f"pool_{int(time.time()*1000)}.json")
     tmp = p + ".tmp"
     json.dump({"uid": uid, "pw": pw, "addr": addr, "tmail_tok": tok,
+               "proxy_seed": PROXY_SEED,
                "cookies": w.cookies.get_dict()}, open(tmp, "w"))
     os.rename(tmp, p)
     print(f"[pool] saved {p}", flush=True)
@@ -127,6 +134,7 @@ def build_account(remaining):
             print("    pool read err:", str(e)[:80]); return None
         F.TMAIL_TOKEN[0] = j.get("tmail_tok") or ""
         uid, pw, addr = j["uid"], j["pw"], j["addr"]
+        apply_seed(j.get("proxy_seed"))
         w = requests.Session()
         w.headers["User-Agent"] = F.WEB_UA
         ckdict = j.get("cookies") or {}
@@ -284,6 +292,7 @@ def main():
         out = {}
         try:
             ident = json.load(open(REUSE_ACCT))
+            apply_seed(ident.get("proxy_seed"))
             w = requests.Session()
             w.headers["User-Agent"] = F.WEB_UA
             w.cookies.update(ident.get("cookies") or {})
