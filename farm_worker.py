@@ -133,22 +133,23 @@ def build_account(remaining):
         ok = False
         if ckdict:  # cookie-direct reuse — no OTP roundtrip needed
             w.cookies.update(ckdict)
-            try:
-                me = w.get("https://ridibooks.com/apps/account/accounts/me", timeout=20)
-                ok = '"idx"' in me.text
-                if ok:
-                    print("    pooled cookies valid → skip login")
-            except Exception as e:
-                print("    cookie check err:", str(e)[:60])
-        if not ok:   # fall back to password+OTP via that identity's mailbox
-            print("    cookies dead → otp re-login")
-            wck = F.full_login(uid, pw)
-            if not wck:
-                print("    [recycle] reason=pooled-login-failed (mailbox likely expired)")
-                return None
-            w = requests.Session()
-            w.cookies.update(wck)
-            w.headers["User-Agent"] = F.WEB_UA
+            for attempt in range(2):
+                try:
+                    me = w.get("https://ridibooks.com/apps/account/accounts/me", timeout=30)
+                    ok = '"idx"' in me.text
+                    if ok:
+                        print("    pooled cookies valid → skip login")
+                        break
+                except Exception as e:
+                    print("    cookie check err:", str(e)[:60])
+                if attempt == 0:
+                    time.sleep(2)
+        if not ok:
+            # A pooled identity with dead cookies is a user-facing dead end:
+            # re-OTP can waste minutes waiting on an expired disposable inbox.
+            # Discard it and let the supervisor select/produce another one.
+            print("    cookies dead → recycle pooled identity")
+            return None
         # 19+ titles need verified-adult on the account; RIDI gates ad-hoc cert
         # by network — rotate Databay exit until it passes (≤5 tries)
         for att in range(5):
