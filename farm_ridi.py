@@ -434,8 +434,12 @@ def route_claims(w, bids):
     for bid in bids:
         q = {"b_ids[0]": bid, "pay_object": "rent", "return_url": "",
              "return_url_at_fail": "", "is_prefer_return_api_endpoint": "true", "is_v2": "true"}
-        rp = w.get("https://ridibooks.com/apps/books/api/payment/route/book",
-                   params=q, timeout=30)
+        try:
+            rp = _rget(w, "https://ridibooks.com/apps/books/api/payment/route/book",
+                       params=q, timeout=60)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            print(f"    route err {bid}: {str(e)[:60]}")
+            continue
         if rp.status_code == 400 and "구매할 수 없습니다" in (rp.text or ""):
             # RIDI blocks THIS episode at payment layer (Selection-only lock) —
             # distinct from 'no coupon left'; report once per bid
@@ -445,18 +449,21 @@ def route_claims(w, bids):
             continue
         j = rp.json()
         info = (j.get("payment_book_cash_and_point") or {}).get("information") or {}
-        if str(info.get("total_price")) == "0":
-            params = (j.get("payment_book_cash_and_point") or {}).get("parameters")
-            pr = w.post("https://ridibooks.com/api/payment/request", data=params,
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=40)
-            if pr.ok and '"t_id"' in pr.text: claimed.append(bid); print(f"  claim(free) {bid}")
-        elif j.get("coupons"):
-            c = j["coupons"][0]
-            pr = w.post(c["link"], data=c["parameters"],
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=40)
-            if pr.ok and '"t_id"' in pr.text: claimed.append(bid); print(f"  claim(coupon) {bid}")
+        try:
+            if str(info.get("total_price")) == "0":
+                params = (j.get("payment_book_cash_and_point") or {}).get("parameters")
+                pr = _rpost(w, "https://ridibooks.com/api/payment/request", data=params,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            timeout=60)
+                if pr.ok and '"t_id"' in pr.text: claimed.append(bid); print(f"  claim(free) {bid}")
+            elif j.get("coupons"):
+                c = j["coupons"][0]
+                pr = _rpost(w, c["link"], data=c["parameters"],
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            timeout=60)
+                if pr.ok and '"t_id"' in pr.text: claimed.append(bid); print(f"  claim(coupon) {bid}")
+        except (requests.Timeout, requests.ConnectionError) as e:
+            print(f"    claim err {bid}: {str(e)[:60]}")
         else:
             # no coupon left / owned
             pass

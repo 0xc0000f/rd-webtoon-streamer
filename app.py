@@ -1068,7 +1068,7 @@ def package_on_finish(job):
     threading.Thread(target=_w, daemon=True).start()
 
 
-RESULT_MAX_AGE_HOURS = float(os.environ.get("RESULT_MAX_AGE_HOURS", "48"))
+RESULT_MAX_AGE_HOURS = float(os.environ.get("RESULT_MAX_AGE_HOURS", "0.5"))
 
 _T0_APP = time.time()
 
@@ -1510,8 +1510,7 @@ class H(BaseHTTPRequestHandler):
             fp = os.path.join(DATA_DIR, "dl", mst.group(1))
             real_name = urllib.parse.unquote(os.path.basename(mst.group("n")))
             cand = os.path.join(fp, real_name)
-            data = open(cand, "rb").read() if os.path.exists(cand) else None
-            if not data:
+            if not os.path.exists(cand):
                 return self._json({"error": "expired or unknown token"}, 404)
             fn = urllib.parse.quote(real_name)
             ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", real_name)[:70].strip() or "export.zip"
@@ -1520,12 +1519,16 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition",
                              f'attachment; filename="{ascii_name}"; '
                              f"filename*=UTF-8''{fn}")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Length", str(os.path.getsize(cand)))
             self.end_headers()
             try:
-                self.wfile.write(data)   # kept in result store (48h TTL sweep);
-                # re-click within window serves instantly
-            except Exception:
+                with open(cand, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
                 pass
             return
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
