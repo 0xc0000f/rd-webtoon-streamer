@@ -2,7 +2,7 @@
 # app.py — Bomtoon-DL-style RIDI webtoon downloader site
 # Flow: search by title -> grid pick -> episode list -> select & download
 # (live progress + AIMD workers) -> read online or export .zip
-import os, re, json, glob, time, threading, subprocess, sys, tempfile, zipfile, html, urllib.parse
+import os, re, json, glob, time, threading, subprocess, sys, tempfile, zipfile, html, urllib.parse, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,8 +25,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 if os.path.isdir(LEGACY_CACHE_DIR):
     shutil.copytree(LEGACY_CACHE_DIR, CACHE_DIR, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("*.tmp"))
-
-import shutil
 
 
 def disk_pct_of(path):
