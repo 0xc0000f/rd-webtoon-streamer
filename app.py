@@ -606,9 +606,11 @@ LANE_IDX = [0]
 
 # ---- prewarmed identity pool: ready accounts so downloads skip email/signup ----
 POOL_DIR = os.path.join(DATA_DIR, "pool")
-# unbounded identity farming (user order 2026-10-22): farm forever, staggered,
-# no ceiling — target number just has to exceed any realistic ready-count
-POOL_TARGET = int(os.environ.get("POOL_TARGET", "3000"))
+# unbounded identity farming (user order 2026-10-23): farm forever, staggered.
+# POOL_TARGET=0 means no ceiling; a positive value is only an optional floor.
+POOL_TARGET = int(os.environ.get("POOL_TARGET", "0") or 0)
+POOL_UNBOUNDED = POOL_TARGET <= 0 or POOL_TARGET >= 100
+POOL_LIMIT = POOL_TARGET if POOL_TARGET > 0 else None
 PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "6"))
 
 
@@ -682,7 +684,7 @@ def prewarm_health(window_bytes=400_000):
     out = {"ready": len(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))),
            "building": len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
                             if time.time() - os.path.getmtime(f) < 240]),
-           "target": POOL_TARGET, "conc": PREWARM_CONC,
+           "target": POOL_LIMIT, "conc": PREWARM_CONC,
            "log_bytes": 0, "log_age_s": None, "scanned_bytes": 0,
            "success_recent": 0, "stall_retries": 0, "errors_recent": errors,
            "error_rate": None}
@@ -712,6 +714,17 @@ def prewarm_health(window_bytes=400_000):
     return out
 
 
+def pool_status():
+    ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
+    busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
+                if time.time() - os.path.getmtime(f) < 240])
+    per = 75
+    eta = None if POOL_LIMIT is None else (
+        ((POOL_LIMIT - ready) * per) // max(busy, 1) if ready < POOL_LIMIT else 0)
+    return {"ready": ready, "refilling": busy, "target": POOL_LIMIT,
+            "eta_s": eta, "unbounded": POOL_UNBOUNDED}
+
+
 def prewarm_loop():
     """continuous staggered identity farming — keep ≥POOL_TARGET ready 24/7,
     ≤PREWARM_CONC builds at once, each on its own Databay session/IP, jittered start"""
@@ -726,10 +739,10 @@ def prewarm_loop():
                         os.remove(f)
                     except OSError:
                         pass
-            # adaptive cap: while pool is half-empty (post-drain burst), allow
+            # adaptive cap: while pool is half-empty (or unlimited), allow
             # extra parallel builders so refill catches up fast again
-            cap = PREWARM_CONC + (4 if n < POOL_TARGET * 0.5 else 0)
-            if n < POOL_TARGET and len(busy) < cap:
+            cap = PREWARM_CONC + (4 if POOL_LIMIT is None or n < POOL_LIMIT * 0.5 else 0)
+            if (POOL_LIMIT is None or n < POOL_LIMIT) and len(busy) < cap:
                 env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR,
                            PROXY_SEED=os.urandom(4).hex(), STAGE_TIMEOUT="180",
                            STAGGER=str(random.randint(0, 35)))
@@ -1343,7 +1356,7 @@ function poll(force){
    if(j.done_list.includes(e.b)&&!e.pages){
     e.pages=(j.pages||{})[e.b]||1;changed=true;
     const row=$('r'+i);if(row)row.outerHTML=rowHTML(e,i,true)}});
-   if(j.pool_ready!=null)$('poolpill').textContent=`identity pool ${j.pool_ready}/${j.pool_target}`;
+   if(j.pool_ready!=null)$('poolpill').textContent=j.pool_target==null?`identity farm: ${j.pool_ready}+`:`identity pool ${j.pool_ready}/${j.pool_target}`;
    showResult(j);
    if(changed&&CUR)renderEps();
    if(!j.active&&tot){
@@ -1517,13 +1530,7 @@ class H(BaseHTTPRequestHandler):
                 "total_mb": round(total, 1),
                 "disk_pct": disk_pct_of(DATA_DIR)})
         elif p == "/api/pool":
-            ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
-            busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
-                        if time.time() - os.path.getmtime(f) < 240])
-            per = 75  # ~sec per identity build (measured median)
-            eta = ((POOL_TARGET - ready) * per) // max(busy, 1) if ready < POOL_TARGET else 0
-            return self._json({"ready": ready, "refilling": busy,
-                               "target": POOL_TARGET, "eta_s": eta})
+            return self._json(pool_status())
         elif p == "/api/settings":
             if data.get("op") == "get":
                 return self._json(load_settings())
@@ -1684,7 +1691,7 @@ class H(BaseHTTPRequestHandler):
                         "stream_url": j.stream_url,
 "pool_ready": len(glob.glob(
                              os.path.join(POOL_DIR, "pool_*.json"))),
-                         "pool_target": POOL_TARGET,
+                          "pool_target": POOL_LIMIT,
                          "pending": j.pending[:20],
                          "supervisor_error": getattr(
                              j, "supervisor_error", "")[-300:],
@@ -1736,15 +1743,7 @@ class H(BaseHTTPRequestHandler):
             return self._json({"lanes": lanes,
                                "prewarm": tail_file(os.path.join(POOL_DIR, "pre.log"), 12000)})
         if p == "/api/pool":
-            ready = len(glob.glob(os.path.join(POOL_DIR, "pool_*.json")))
-            busy = len([f for f in glob.glob(os.path.join(POOL_DIR, "*.busy"))
-                        if time.time() - os.path.getmtime(f) < 240])
-            per = 75
-            eta = ((POOL_TARGET - ready) * per) // max(busy, 1) \
-                if ready < POOL_TARGET else 0
-            return self._json({"ready": ready, "refilling": busy,
-                               "target": POOL_TARGET, "eta_s": eta,
-                               "unbounded": POOL_TARGET >= 100})
+            return self._json(pool_status())
         if p == "/api/pool/health":
             return self._json(prewarm_health())
         if p == "/api/library":
