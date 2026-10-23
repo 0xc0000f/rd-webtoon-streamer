@@ -619,7 +619,7 @@ def prewarm_loop():
             cap = PREWARM_CONC + (3 if n < POOL_TARGET * 0.5 else 0)
             if n < POOL_TARGET and len(busy) < cap:
                 env = dict(os.environ, PREWARM="1", POOL_DIR=POOL_DIR,
-                           PROXY_SEED=os.urandom(4).hex(),
+                           PROXY_SEED=os.urandom(4).hex(), STAGE_TIMEOUT="180",
                            STAGGER=str(random.randint(0, 35)))
                 try:
                     os.makedirs(POOL_DIR, exist_ok=True)

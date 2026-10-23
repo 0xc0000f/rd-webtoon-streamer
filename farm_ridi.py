@@ -52,55 +52,135 @@ def _ridi_email_ok(addr):
         return False          # network flake → don't lock the provider in
 
 
+_MAIL_PROVIDERS = ("tempmail", "mailtm", "tempmailio")
+
+
+def _mail_state_file(key):
+    pool_dir = os.environ.get("POOL_DIR", "").strip()
+    if not pool_dir:
+        return ""
+    try:
+        os.makedirs(pool_dir, exist_ok=True)
+    except OSError:
+        return ""
+    return os.path.join(pool_dir, f"mail_state_{key}.json")
+
+
+def _mail_provider_bad(idx):
+    fp = _mail_state_file(f"domain_down_{idx}")
+    try:
+        return json.load(open(fp)).get("until", 0) > time.time()
+    except Exception:
+        return False
+
+
+def _mail_mark_domain_down(idx, ttl=1800):
+    _PROVIDER_CACHE[0] = None
+    fp = _mail_state_file(f"domain_down_{idx}")
+    try:
+        json.dump({"until": time.time() + ttl}, open(fp, "w"))
+    except OSError:
+        pass
+
+
+def _mail_mark_domain_good(idx):
+    _PROVIDER_CACHE[0] = idx
+    fp = _mail_state_file("domain_good")
+    try:
+        json.dump({"idx": idx, "until": time.time() + 1800}, open(fp, "w"))
+    except OSError:
+        pass
+
+
+def _mail_preferred_provider():
+    fp = _mail_state_file("domain_good")
+    try:
+        j = json.load(open(fp))
+        if j.get("until", 0) > time.time() and 0 <= j.get("idx", -1) < len(_MAIL_PROVIDERS):
+            return j["idx"]
+    except Exception:
+        pass
+    return _PROVIDER_CACHE[0]
+
+
 def _gen_tempmail():
-    a = requests.get("https://api.tempmail.lol/generate",
-                     headers={"User-Agent": WEB_UA}, timeout=30).json()
-    return a["address"], a["token"]
+    r = requests.post("https://api.tempmail.lol/v2/inbox/create",
+                      headers={"User-Agent": WEB_UA, "Accept": "application/json"},
+                      timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"tempmail http {r.status_code} {r.text[:80]}")
+    try:
+        a = r.json()
+    except Exception:
+        raise RuntimeError(f"tempmail bad-json {r.text[:80]}")
+    addr, tok = a.get("address"), a.get("token")
+    if not addr or not tok:
+        raise RuntimeError(f"tempmail missing address {r.text[:80]}")
+    return addr, tok
 
 
 def _gen_mtm():
-    d = requests.get("https://api.mail.tm/domains", headers=_MT_HDR, timeout=30).json()
+    r = requests.get("https://api.mail.tm/domains", headers=_MT_HDR, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"mailtm domains http {r.status_code}")
+    d = r.json()
     dom = d["hydra:member"][0]["domain"]
     addr = "rw" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10)) \
         + "@" + dom
     pw = "RidiMail" + random.choice(string.ascii_letters) + "!9x"
-    requests.post("https://api.mail.tm/accounts", headers={**_MT_HDR,
-                  "Content-Type": "application/json"},
+    hdr = {**_MT_HDR, "Content-Type": "application/json"}
+    requests.post("https://api.mail.tm/accounts", headers=hdr,
                   json={"address": addr, "password": pw}, timeout=30)
-    tok = requests.post("https://api.mail.tm/token", headers={**_MT_HDR,
-                        "Content-Type": "application/json"},
-                        json={"address": addr, "password": pw}, timeout=30).json()["token"]
+    rt = requests.post("https://api.mail.tm/token", headers=hdr,
+                       json={"address": addr, "password": pw}, timeout=30)
+    if rt.status_code != 200:
+        raise RuntimeError(f"mailtm token http {rt.status_code}")
+    tok = rt.json()["token"]
     return addr, "mtm:" + tok
 
 
 def _gen_tmio():
-    t = requests.post("https://api.internal.temp-mail.io/api/v3/email/new",
-                      headers={"User-Agent": "okhttp/4.9.1"}, timeout=20).json()
-    return t["email"], "tmio:" + t["email"]
+    r = requests.post("https://api.internal.temp-mail.io/api/v3/email/new",
+                      headers={"User-Agent": "okhttp/4.9.1"}, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"tmio http {r.status_code} {r.text[:80]}")
+    t = r.json()
+    addr, tok = t.get("email"), t.get("token")
+    if not addr:
+        raise RuntimeError(f"tmio missing email {r.text[:80]}")
+    return addr, "tmio:" + (tok or addr)
 
 
 _PROVIDERS = [_gen_tempmail, _gen_mtm, _gen_tmio]
 
 def tmail_new():
-    """provider chain: try cached-good provider first; every candidate address is
-    validated against RIDI's signup email-check so blacklisted domains are skipped"""
+    """provider chain with a shared RIDI-domain circuit breaker; every address
+    is validated against RIDI before signup to avoid wasting accounts on banned domains"""
     order = list(range(len(_PROVIDERS)))
-    k = _PROVIDER_CACHE[0]
+    k = _mail_preferred_provider()
     if k is not None and k in order:
         order.remove(k); order.insert(0, k)
     errs = []
     for idx in order:
-        for att in range(2):
+        if _mail_provider_bad(idx):
+            errs.append(f"{_MAIL_PROVIDERS[idx]}:domain-circuit")
+            continue
+        for att in range(3):
             try:
                 addr, tok = _PROVIDERS[idx]()
                 if _ridi_email_ok(addr):
-                    _PROVIDER_CACHE[0] = idx
+                    _mail_mark_domain_good(idx)
                     return addr, tok
-                errs.append(f"p{idx}:domain-rejected")
-                break                      # domain dead → next provider now
+                _mail_mark_domain_down(idx, 1800)
+                errs.append(f"{_MAIL_PROVIDERS[idx]}:domain-rejected")
+                break
             except Exception as e:
-                errs.append(f"p{idx}:{str(e)[:50]}")
-                time.sleep(3 * (att + 1))
+                reason = str(e)[:70]
+                errs.append(f"{_MAIL_PROVIDERS[idx]}:{reason}")
+                if "http 429" in reason or "too many" in reason.lower():
+                    time.sleep(min(20, 5 * (att + 1)) + random.uniform(0, 2))
+                else:
+                    time.sleep(2 * (att + 1) + random.uniform(0, 1))
     raise RuntimeError("all mail providers failed: " + "; ".join(errs[:6]))
 
 
