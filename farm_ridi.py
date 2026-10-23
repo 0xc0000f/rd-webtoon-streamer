@@ -38,18 +38,25 @@ _PROVIDER_CACHE = [None]   # index of last provider RIDI accepted
 
 
 def _ridi_email_ok(addr):
-    """cheap oracle: does RIDI signup accept this domain at all?"""
-    try:
-        r = requests.post(
-            "https://ridibooks.com/apps/frontend/v1/account/validation/email",
-            json={"email": addr},
-            headers={"User-Agent": WEB_UA, "Origin": "https://ridibooks.com"},
-            timeout=20)
-        d = (r.json() or {}).get("data") or {}
-        return d.get("valid") is True
-    except Exception as e:
-        print("  [email-domain probe err]", str(e)[:60])
-        return False          # network flake → don't lock the provider in
+    """RIDI's signup-domain oracle. True/False are definitive answers; None means
+    the oracle itself was unreachable and must NOT open the domain circuit."""
+    last = None
+    for attempt in range(4):
+        try:
+            r = requests.post(
+                "https://ridibooks.com/apps/frontend/v1/account/validation/email",
+                json={"email": addr},
+                headers={"User-Agent": WEB_UA, "Origin": "https://ridibooks.com"},
+                timeout=45)
+            d = (r.json() or {}).get("data")
+            if d is None:
+                raise ValueError(str(r.text)[:80])
+            return d.get("valid") is True
+        except Exception as e:
+            last = str(e)[:60]
+            time.sleep(3 * (attempt + 1))
+    print("  [email-domain oracle unreachable]", last)
+    return None
 
 
 _MAIL_PROVIDERS = ("tempmail", "mailtm", "tempmailio")
@@ -67,7 +74,7 @@ def _mail_state_file(key):
 
 
 def _mail_provider_bad(idx):
-    fp = _mail_state_file(f"domain_down_{idx}")
+    fp = _mail_state_file(f"domain_down_v2_{idx}")
     try:
         return json.load(open(fp)).get("until", 0) > time.time()
     except Exception:
@@ -76,7 +83,7 @@ def _mail_provider_bad(idx):
 
 def _mail_mark_domain_down(idx, ttl=1800):
     _PROVIDER_CACHE[0] = None
-    fp = _mail_state_file(f"domain_down_{idx}")
+    fp = _mail_state_file(f"domain_down_v2_{idx}")
     try:
         json.dump({"until": time.time() + ttl}, open(fp, "w"))
     except OSError:
@@ -85,7 +92,7 @@ def _mail_mark_domain_down(idx, ttl=1800):
 
 def _mail_mark_domain_good(idx):
     _PROVIDER_CACHE[0] = idx
-    fp = _mail_state_file("domain_good")
+    fp = _mail_state_file("domain_good_v2")
     try:
         json.dump({"idx": idx, "until": time.time() + 1800}, open(fp, "w"))
     except OSError:
@@ -93,7 +100,7 @@ def _mail_mark_domain_good(idx):
 
 
 def _mail_preferred_provider():
-    fp = _mail_state_file("domain_good")
+    fp = _mail_state_file("domain_good_v2")
     try:
         j = json.load(open(fp))
         if j.get("until", 0) > time.time() and 0 <= j.get("idx", -1) < len(_MAIL_PROVIDERS):
@@ -101,6 +108,27 @@ def _mail_preferred_provider():
     except Exception:
         pass
     return _PROVIDER_CACHE[0]
+
+
+def _mail_bump_reject(idx):
+    fp = _mail_state_file(f"rejects_v2_{idx}")
+    try:
+        n = int(json.load(open(fp)).get("n", 0)) + 1
+    except Exception:
+        n = 1
+    try:
+        json.dump({"n": n, "at": time.time()}, open(fp, "w"))
+    except OSError:
+        pass
+    return n
+
+
+def _mail_reset_rejects(idx):
+    fp = _mail_state_file(f"rejects_v2_{idx}")
+    try:
+        os.remove(fp)
+    except OSError:
+        pass
 
 
 def _gen_tempmail():
@@ -165,15 +193,22 @@ def tmail_new():
         if _mail_provider_bad(idx):
             errs.append(f"{_MAIL_PROVIDERS[idx]}:domain-circuit")
             continue
-        for att in range(3):
+        for att in range(5):
             try:
                 addr, tok = _PROVIDERS[idx]()
-                if _ridi_email_ok(addr):
+                ok = _ridi_email_ok(addr)
+                if ok is True:
+                    _mail_reset_rejects(idx)
                     _mail_mark_domain_good(idx)
                     return addr, tok
-                _mail_mark_domain_down(idx, 1800)
-                errs.append(f"{_MAIL_PROVIDERS[idx]}:domain-rejected")
-                break
+                if ok is False:
+                    n = _mail_bump_reject(idx)
+                    errs.append(f"{_MAIL_PROVIDERS[idx]}:domain-rejected:{n}")
+                    if n >= 3:
+                        _mail_mark_domain_down(idx, 1800)
+                        break
+                    continue
+                errs.append(f"{_MAIL_PROVIDERS[idx]}:oracle-unreachable")
             except Exception as e:
                 reason = str(e)[:70]
                 errs.append(f"{_MAIL_PROVIDERS[idx]}:{reason}")
