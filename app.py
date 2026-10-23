@@ -1552,7 +1552,8 @@ class H(BaseHTTPRequestHandler):
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
         mr = re.match(r"^/ep/(\d+)/?$", p)
         if p == "/api/debug/uri":
-            identities = sorted(glob.glob(os.path.join(POOL_DIR, "*.json")))
+            identities = (sorted(glob.glob(os.path.join(POOL_DIR, "active_*.json"))) +
+                          sorted(glob.glob(os.path.join(POOL_DIR, "pool_*.json"))))
             if not identities:
                 return self._json({"error": "no pooled identity"})
             ident = identities[0]
