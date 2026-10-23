@@ -359,13 +359,18 @@ def signup(addr):
     return (uid, pw, ck) if sent and ok else (None, None, None)
 
 def activate(link):
-    try:
-        s = requests.Session(); s.headers["User-Agent"] = WEB_UA
-        g = s.get(link, timeout=60, allow_redirects=True)
-        return "signup/complete" in g.url
-    except (requests.Timeout, requests.ConnectionError) as e:
-        print("  activation request failed:", str(e)[:60])
-        return False
+    last = ""
+    for attempt in range(3):
+        try:
+            s = requests.Session()
+            s.headers["User-Agent"] = WEB_UA
+            g = s.get(link, timeout=70, allow_redirects=True)
+            return "signup/complete" in g.url
+        except Exception as e:
+            last = str(e)[:70]
+            print("  activation request failed:", last)
+            time.sleep(3 * (attempt + 1))
+    return False
 
 # ---------- login + otp ----------
 def full_login(uid, pw):
