@@ -521,7 +521,7 @@ class Job:
         self.bid_stage = {}
         self.lock_reason = {}   # bid -> human reason for paid_list entries
         self.log = []
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.lanes = []
         self.workers_target = 2
         self.max_workers = MAX_WORKERS
@@ -529,10 +529,13 @@ class Job:
         self.history = []
         self.alive = True
         self.packaged = False
+        self.supervisor_error = ""
 
     def logf(self, s):
         with self.lock:
             self.log.append(f"[{time.strftime('%H:%M:%S')}] {s}")
+            if len(self.log) > 300:
+                del self.log[:-300]
 
 
 JOB = None
@@ -788,90 +791,112 @@ def lane_run(job, lane):
 
 
 def aimd_supervisor(job):
-    pass
+    import traceback as _tb
     last_scale = time.time()
+    last_spawn = time.time()
     while True:
-        with job.lock:
-            pend = [b for b in job.pending if str(b) not in job.done]
-            job.pending = pend
-            n_lanes = len(job.lanes)
-            target = job.workers_target
-            have_work = bool(pend)
-        recent = job.history[-3:]
-        now = time.time()
-        if len(recent) == 3 and all(recent) and now - last_scale > 20:
+        try:
             with job.lock:
-                if job.workers_target < job.max_workers:
-                    job.workers_target += 1
+                job.pending = [b for b in job.pending if str(b) not in job.done]
+                n_lanes = len(job.lanes)
+                target = job.workers_target
+                have_work = bool(job.pending)
+            recent = list(job.history[-3:])
+            now = time.time()
+            if len(recent) == 3 and all(recent) and now - last_scale > 20:
+                increased = False
+                with job.lock:
+                    if job.workers_target < job.max_workers:
+                        job.workers_target += 1
+                        increased = True
+                if increased:
                     job.logf(f"AIMD additive increase → workers={job.workers_target}")
-            last_scale = now
-        elif any(not x for x in recent) and now - last_scale > 30:
+                last_scale = now
+            elif any(not x for x in recent) and now - last_scale > 30:
+                new_target = None
+                with job.lock:
+                    nt = max(job.min_workers, int(job.workers_target * 0.5))
+                    if nt != job.workers_target:
+                        job.workers_target = nt
+                        new_target = nt
+                if new_target is not None:
+                    job.logf(f"AIMD multiplicative decrease → workers={new_target}")
+                last_scale = now
+
+            i = 0
+            while have_work and (n_lanes + i) < target and i < 4:
+                with job.lock:
+                    take = max(1, len(job.pending) // max(target - n_lanes, 1))
+                    bids = []
+                    for b in list(job.pending)[:take]:
+                        if str(b) not in job.done:
+                            if str(b) in job.paid:
+                                job.pending.remove(b); continue
+                            bids.append(b); job.pending.remove(b)
+                if not bids:
+                    break
+                with job.lock:
+                    LANE_IDX[0] = (LANE_IDX[0] + 1) % len(DL_DIRS)
+                    idx = LANE_IDX[0]
+                out = DL_DIRS[idx]
+                os.makedirs(out, exist_ok=True)
+                sf = os.path.join(DATA_DIR, f"w{idx:02d}.state.json")
+                json.dump({"done": {}, "accounts": []}, open(sf, "w"))
+                env = dict(os.environ)
+                pool_file = take_pool()
+                if pool_file:
+                    env["REUSE_ACCT"] = pool_file
+                    job.logf(f"pooled account → instant start ({os.path.basename(pool_file)})")
+                spawn_pre(0)
+                lf = getattr(job, "last_fail_t", 0)
+                if time.time() - lf < 25:
+                    time.sleep(max(0, 26 - (time.time() - lf)))
+                pr = subprocess.Popen([sys.executable, WORKER, sf, out] + bids,
+                                      stdout=open(os.path.join(out, "lane.log"), "ab"),
+                                      stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
+                lane = {"proc": pr, "statefile": sf, "outroot": out, "bids": bids}
+                with job.lock:
+                    job.lanes.append(lane)
+                threading.Thread(target=lane_run, args=(job, lane), daemon=True).start()
+                last_spawn = time.time()
+                i += 1
+
+            time.sleep(4)
+            need_pkg = False
             with job.lock:
-                nt = max(job.min_workers, int(job.workers_target * 0.5))
-                if nt != job.workers_target:
-                    job.logf(f"AIMD multiplicative decrease → workers={nt}")
-                    job.workers_target = nt
-            last_scale = now
-        i = 0
-        while have_work and (n_lanes + i) < target and i < 4:
-            with job.lock:
-                take = max(1, len(job.pending) // max(target - n_lanes, 1))
-                bids = []
-                for b in list(job.pending)[:take]:
-                    if str(b) not in job.done:
-                        if str(b) in job.paid:
-                            job.pending.remove(b); continue
-                        bids.append(b); job.pending.remove(b)
-            if not bids:
-                break
-            with job.lock:
-                LANE_IDX[0] = (LANE_IDX[0] + 1) % len(DL_DIRS)
-                idx = LANE_IDX[0]
-            out = DL_DIRS[idx]
-            os.makedirs(out, exist_ok=True)
-            sf = os.path.join(DATA_DIR, f"w{idx:02d}.state.json")
-            json.dump({"done": {}, "accounts": []}, open(sf, "w"))
-            env = dict(os.environ)
-            pool_file = take_pool()          # reuse prewarmed identity if any
-            if pool_file:
-                env["REUSE_ACCT"] = pool_file
-                job.logf(f"pooled account → instant start ({os.path.basename(pool_file)})")
-            spawn_pre(0)                     # keep the pool topped up
-            lf = getattr(job, "last_fail_t", 0)
-            if time.time() - lf < 25:        # backoff after a zero-download lane
-                time.sleep(max(0, 26 - (time.time() - lf)))
-            pr = subprocess.Popen([sys.executable, WORKER, sf, out] + bids,
-                                  stdout=open(os.path.join(out, "lane.log"), "ab"),
-                                  stderr=subprocess.STDOUT, cwd=APP_ROOT, env=env)
-            lane = {"proc": pr, "statefile": sf, "outroot": out, "bids": bids}
-            with job.lock:
-                job.lanes.append(lane)
-            threading.Thread(target=lane_run, args=(job, lane), daemon=True).start()
-            i += 1
-        time.sleep(4)
-        need_pkg = False
-        with job.lock:
-            if not job.pending and len(job.lanes) == 0:
-                job.alive = False
-                # final titles update for done eps
-                titles = load_titles()
-                dirty = False
+                need_pkg = not job.pending and len(job.lanes) == 0
+                if need_pkg:
+                    job.alive = False
+            if need_pkg:
+                job.logf("ALL DONE")
+                titles = load_titles(); dirty = False
                 for b in list(job.done):
                     if b not in titles:
                         try:
-                            j2 = book_meta(b)
-                            name = (j2.get("title") or "").strip()
+                            name = (book_meta(b).get("title") or "").strip()
                             if name:
                                 titles[b] = name; dirty = True
                         except Exception:
                             pass
                 if dirty:
                     save_titles(titles)
-                job.logf("ALL DONE")
-                need_pkg = True
-        if need_pkg:
-            package_on_finish(job)
-            return
+                package_on_finish(job)
+                return
+
+            with job.lock:
+                stalled = (bool(job.pending) and not job.lanes
+                           and job.alive
+                           and time.time() - last_spawn > 120)
+            if stalled:
+                job.last_fail_t = 0
+                job.history.clear()
+                job.logf("stalled job: pending>0 lanes=0 → force respawn")
+        except Exception:
+            err = _tb.format_exc()
+            job.supervisor_error = err[-500:]
+            print("[supervisor] " + err[-500:], flush=True)
+            job.logf("supervisor error → auto-restarting loop")
+            time.sleep(5)
 
 
 STAGE_LABELS = (
@@ -1274,6 +1299,12 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def handle(self):
+        try:
+            BaseHTTPRequestHandler.handle(self)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _json(self, obj, code=200):
         b = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -1444,10 +1475,13 @@ class H(BaseHTTPRequestHandler):
                         "pending_n": max(0, pend + fail), "fail_n": fail,
                         "progress": job_progress(j), "cache": j.cache,
                         "stream_url": j.stream_url,
-                        "pool_ready": len(glob.glob(
-                            os.path.join(POOL_DIR, "pool_*.json"))),
-                        "pool_target": POOL_TARGET,
-                        "log": j.log[-8:], "done_list": done_list})
+"pool_ready": len(glob.glob(
+                             os.path.join(POOL_DIR, "pool_*.json"))),
+                         "pool_target": POOL_TARGET,
+                         "pending": j.pending[:20],
+                         "supervisor_error": getattr(
+                             j, "supervisor_error", "")[-300:],
+                         "log": j.log[-8:], "done_list": done_list})
         elif mz:
             bid = mz.group(1)
             pages = find_pages(bid)
