@@ -1251,7 +1251,7 @@ function renderEps(){
 function tog(el){el.checked?SEL.add(el.dataset.b):SEL.delete(el.dataset.b);
  const btn=document.querySelector('#actionbar button');if(btn)btn.textContent=`⬇ โหลดตอนที่เลือก (${SEL.size})`}
 function selAll(v){document.querySelectorAll('.sel:not([disabled])').forEach(c=>{c.checked=v;v?SEL.add(c.dataset.b):SEL.delete(c.dataset.b)});renderEps()}
-let DL_BIDS=[],STREAMED=false;
+let DL_BIDS=[],STREAMED=false,ZIP_WAIT=0;
 function clickA(href){const a=document.createElement('a');a.href=href;a.download='';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),400)}
 function showResult(j){
  const b=$('resultbox');if(!b)return;
@@ -1264,7 +1264,7 @@ const CK=()=>$('cacheck')?$('cacheck').checked:false;
 async function dlSelected(){
  const missing=[...SEL].filter(b=>!EPS.find(e=>e.b===b&&e.pages));
  if(!missing.length)return alert('เลือกตอนที่ยังไม่ได้โหลดก่อน');
- DL_BIDS=missing.slice();STREAMED=false;
+ DL_BIDS=missing.slice();STREAMED=false;ZIP_WAIT=0;
  const r=await fetch('/api/download',{method:'POST',body:JSON.stringify({bids:missing,cache:CK()})});
  await r.json();
  statusShow({progress:{step:'queued — picking pooled identity…',pct:0},workers_now:0,max_workers:16,done_n:0,pending_n:missing.length,fail_n:0});
@@ -1298,6 +1298,7 @@ function poll(force){
    showResult(j);
    if(changed&&CUR)renderEps();
    if(!j.active&&tot){
+    if(!j.stream_url&&!j.cache&&ZIP_WAIT++<10)return;
     clearInterval(POLLT);POLLT=null;statusHide();
     if((DL_BIDS||[]).length&&!STREAMED&&j.stream_url){STREAMED=true;clickA(j.stream_url)}
     DL_BIDS=[];loadLib();if(!j.cache&&CUR&&CUR.q)openByQuery(CUR.q)}
