@@ -1526,8 +1526,11 @@ class H(BaseHTTPRequestHandler):
                 except OSError as e:
                     return {"error": str(e)[:160]}
             lanes = []
-            with JOB.lock:
-                live = list(JOB.lanes)
+            if JOB:
+                with JOB.lock:
+                    live = list(JOB.lanes)
+            else:
+                live = []
             for l in live:
                 out = l.get("outroot") or ""
                 lanes.append({"pid": l.get("pid"), "outroot": out,
