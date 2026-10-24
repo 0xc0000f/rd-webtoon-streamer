@@ -152,15 +152,14 @@ class LezhinWeb:
 
     def _load_cookies(self):
         jar = http.cookiejar.MozillaCookieJar(str(self.cookie_file))
-        if self.cookie_file.is_file():
-            jar.load(ignore_discard=True, ignore_expires=True)
         encoded = os.environ.get("LEZHIN_COOKIES_B64")
-        if encoded and not any(cookie.name == "JSESSIONID" for cookie in jar):
+        if encoded:
             try:
                 self.cookie_file.write_bytes(base64.b64decode(encoded))
-                jar.load(ignore_discard=True, ignore_expires=True)
             except Exception:
                 pass
+        if self.cookie_file.is_file():
+            jar.load(ignore_discard=True, ignore_expires=True)
         self.session.cookies = requests.cookies.RequestsCookieJar()
         for cookie in jar:
             self.session.cookies.set_cookie(cookie)
@@ -193,10 +192,19 @@ class LezhinWeb:
             headers["content-type"] = "application/json"
         return headers
 
+    def _snapshot_cookie(self, name):
+        return next((cookie for cookie in self.session.cookies if cookie.name == name), None)
+
+    def _restore_cookie(self, cookie):
+        if cookie is None:
+            return
+        self.session.cookies.set_cookie(cookie)
+
     def login(self, force=False):
         with self.lock:
             if not force and self._token_valid():
                 return self.token or ""
+            adult_cookie = self._snapshot_cookie("_LZ_FS")
             response = self.session.post(
                 f"{API_ROOT}/api/authentication/login",
                 headers=self._headers(json_body=True),
@@ -217,6 +225,7 @@ class LezhinWeb:
             payload = _decode_jwt_payload(token)
             if not self.user_id:
                 self.user_id = int(payload.get("sub") or 0)
+            self._restore_cookie(adult_cookie)
             self._save_token()
             self._save_cookies()
             return token
@@ -246,6 +255,35 @@ class LezhinWeb:
         if payload.get("code") != 0 or not payload.get("data"):
             raise LezhinError(f"balance failed: {payload}")
         return payload["data"]
+
+    def auth_status(self, force=False):
+        self.login(force=force)
+        alias = (os.environ.get("LEZHIN_STATUS_ALIAS") or "favoriteboy").strip("/")
+        web_error = ""
+        try:
+            body = self._rsc_body(alias)
+            web_ok = bool(CONTENT_RE.search(body) and EPISODES_RE.search(body))
+            if not web_ok:
+                web_error = "comic page did not contain content or episodes"
+        except Exception as error:
+            web_ok = False
+            web_error = str(error)
+        token_payload = _decode_jwt_payload(self.token or "")
+        data = self.get_balance()
+        return {
+            "ok": web_ok,
+            "token_valid": self._token_valid(),
+            "token_exp": token_payload.get("exp"),
+            "user_id": token_payload.get("sub"),
+            "cookies": len(self.session.cookies),
+            "has_jsessionid": any(cookie.name == "JSESSIONID" for cookie in self.session.cookies),
+            "web_ok": web_ok,
+            "web_error": web_error,
+            "status_alias": alias,
+            "balance": data,
+            "usable": self.usable(data),
+            "auth_dir": str(self.auth_dir),
+        }
 
     @staticmethod
     def usable(balance):
@@ -606,6 +644,10 @@ def detail(alias):
 def balance():
     data = APP.get_balance()
     return {"balance": data, "usable": APP.usable(data)}
+
+
+def auth_status(force=False):
+    return APP.auth_status(force=force)
 
 
 def download(alias, seq):

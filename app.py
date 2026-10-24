@@ -1770,6 +1770,12 @@ class H(BaseHTTPRequestHandler):
                 return self._json(LZ.balance())
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
+        if p == "/api/lz/status":
+            force = (qs.get("force") or ["0"])[0].lower() in {"1", "true", "yes"}
+            try:
+                return self._json(LZ.auth_status(force=force))
+            except Exception as error:
+                return self._json({"ok": False, "error": str(error)}, 500)
         if p == "/api/lz/download":
             alias = (qs.get("alias") or [""])[0].strip("/")
             seq = (qs.get("seq") or ["0"])[0]
