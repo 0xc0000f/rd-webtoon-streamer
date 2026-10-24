@@ -2,6 +2,7 @@ import base64
 import http.cookiejar
 import io
 import json
+from io import StringIO
 import math
 import os
 import re
@@ -141,7 +142,9 @@ class LezhinWeb:
         self._genres = {}
 
     def _load_token(self):
-        if self.token_file.is_file():
+        if os.environ.get("LEZHIN_TOKEN"):
+            self.token = os.environ["LEZHIN_TOKEN"].strip()
+        if not self.token and self.token_file.is_file():
             self.token = self.token_file.read_text(encoding="utf-8").strip() or None
 
     def _save_token(self):
@@ -151,10 +154,23 @@ class LezhinWeb:
         jar = http.cookiejar.MozillaCookieJar(str(self.cookie_file))
         if self.cookie_file.is_file():
             jar.load(ignore_discard=True, ignore_expires=True)
-        self.session.cookies = jar
+        encoded = os.environ.get("LEZHIN_COOKIES_B64")
+        if encoded and not list(jar):
+            try:
+                self.cookie_file.write_bytes(base64.b64decode(encoded))
+                jar.load(ignore_discard=True, ignore_expires=True)
+            except Exception:
+                pass
+        self.session.cookies = requests.cookies.RequestsCookieJar()
+        for cookie in jar:
+            self.session.cookies.set_cookie(cookie)
 
     def _save_cookies(self):
-        self.session.cookies.save(ignore_discard=True, ignore_expires=True)
+        jar = http.cookiejar.MozillaCookieJar(str(self.cookie_file))
+        for cookie in self.session.cookies:
+            jar.set_cookie(cookie)
+        self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        jar.save(ignore_discard=True, ignore_expires=True)
 
     def _token_expiry(self):
         return _decode_jwt_payload(self.token or "").get("exp")
