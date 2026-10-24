@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# app.py — Bomtoon-DL-style RIDI webtoon downloader site
+# app.py — LEZHIN DL webtoon downloader site
 # Flow: search by title -> grid pick -> episode list -> select & download
 # (live progress + AIMD workers) -> read online or export .zip
 import os, re, json, glob, time, threading, subprocess, sys, tempfile, zipfile, html, urllib.parse, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import lezhin_dl as LZ
 
 PORT = int(os.environ.get("PORT", 3000))
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "16"))
@@ -1206,7 +1207,7 @@ def start_job(bids, cache=False):
 # ---------------- UI ----------------
 PAGE = r"""<!doctype html><html lang=th><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>RIDI Webtoon DL</title><style>
+<title>LEZHIN DL · RIDI</title><style>
 :root{--pink:#ff4081;--bg:#101014;--card:#191922;--line:#272733}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eee;
 font-family:'Noto Sans',system-ui,sans-serif}
@@ -1256,7 +1257,7 @@ select,input[type=number]{background:var(--card);border:1px solid var(--line);co
 padding:7px 10px;border-radius:8px;font-size:13px}
 </style></head><body>
 <div id=pbar></div>
-<header><div class=logo>📕 RIDI Webtoon DL</div>
+<header><div class=logo>🔷 LEZHIN DL · RIDI</div>
 <input id=q type=text placeholder="พิมพ์ชื่อเรื่อง หรือวาง URL/รหัสตอน">
 <button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span>
 <span class=pill id=poolpill style=color:#ffd479>identity pool …</span></header>
@@ -1422,6 +1423,73 @@ function statusShow(j){
 function statusHide(){const s=$('status');if(s)s.style.display='none'}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 loadLib();poolTick();poll();
+</script></body></html>"""
+
+
+LZ_PAGE = r"""<!doctype html><html lang=th><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>LEZHIN DL</title>
+<meta property=og:title content="LEZHIN DL">
+<meta name=description content="Lezhin webtoon episode ZIP downloader">
+<style>
+:root{--pink:#34d399;--bg:#0c1013;--card:#151a1f;--line:#263038}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eee;
+font-family:'Noto Sans',system-ui,sans-serif}
+header{display:flex;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);
+position:sticky;top:0;background:rgba(12,16,19,.96);backdrop-filter:blur(6px);z-index:5;flex-wrap:wrap}
+.logo{font-weight:900;font-size:19px;color:var(--pink);letter-spacing:.04em}
+.sub{font-size:12px;color:#8996a3;white-space:nowrap}
+input[type=text]{flex:1;min-width:210px;background:var(--card);border:1px solid var(--line);color:#eee;
+padding:11px 14px;border-radius:10px;font-size:14px}
+button{background:linear-gradient(135deg,#10b981,#047857);color:#fff;border:0;padding:11px 18px;
+border-radius:10px;font-weight:700;cursor:pointer}
+button:disabled{filter:grayscale(.5);opacity:.65;cursor:wait}
+a.link{color:#8dd3b6;font-size:13px;text-decoration:none}.back{color:#888;cursor:pointer;font-size:13px}
+main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
+.count{float:right;color:#8996a3;font-size:12px;font-weight:400}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:12px;margin-top:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;transition:.15s}
+.card:hover{transform:translateY(-2px);border-color:var(--pink)}
+.card img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#182027}
+.card b{display:block;font-size:13px;padding:8px 10px 2px;line-height:1.35}
+.card span{display:block;font-size:11px;color:#8996a3;padding:0 10px 10px}
+.age{display:inline-block;background:#5a1426;color:#ff94a9;border-radius:4px;padding:1px 5px;font-weight:700}
+.head{display:flex;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:14px 0}
+.head img{width:110px;aspect-ratio:3/4;object-fit:cover;border-radius:10px;flex:none;background:#182027}
+.head h2{margin:0 0 6px;font-size:20px}.artist{color:#8dd3b6;font-size:13px;margin:6px 0}
+.genre{color:#9bb0c1;font-size:12px}.synopsis{color:#aab5bf;font-size:12px;line-height:1.5;margin-top:9px}
+.ep{display:grid;grid-template:1fr/48px 54px 1fr auto auto;gap:10px;align-items:center;border-top:1px solid var(--line);padding:10px 2px}
+.ep .n{font-weight:700;color:var(--pink);text-align:right}.ep img{width:54px;aspect-ratio:3/4;object-fit:cover;border-radius:5px}
+.ep .t{font-size:14px}.ep .coin{font-size:12px;color:#ffd166;min-width:64px;text-align:right}
+.ep .owned{font-size:11px;color:#7bd88f}.zip{padding:7px 11px;font-size:12px;border-radius:8px}
+.err{color:#ffb4ab;background:#2a1317;border:1px solid #5b2730;border-radius:10px;padding:10px 12px}
+</style></head><body>
+<header><div class=logo>LEZHIN DL</div><span class=sub>Episode ZIP Downloader</span>
+<input id=q type=text placeholder="พิมพ์ชื่อเรื่อง Lezhin…"><button onclick=search()>ค้นหา</button>
+<a class=link href=/ridi>ใช้ RIDI เดิม</a></header>
+<main id=out><h3>ค้นหาเรื่องจาก Lezhin แล้วเลือกเพื่อโหลด ZIP เป็นตอน</h3></main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>(s+'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp'}[c]));
+async function search(){const q=$('q').value.trim();if(!q)return;const out=$('out');out.innerHTML='<h3>กำลังค้นหา…</h3>';
+ const r=await fetch('/api/lz/search?'+new URLSearchParams({q,limit:30}));const j=await r.json();
+ if(!r.ok||j.error){out.innerHTML=`<div class=err>${esc(j.error||'ค้นหาไม่สำเร็จ')}</div>`;return}
+ let h=`<h3>${esc(q)} <span class=count>${j.count} เรื่อง</span></h3><div class=grid>`;
+ (j.items||[]).forEach(x=>{h+=`<div class=card onclick="openComic('${esc(x.alias)}')"><img loading=lazy src="${esc(x.cover)}" onerror="this.hidden=true"><b>${esc(x.title)}</b><span>${esc(x.artists||'—')}<br><span class=age>${esc(x.rating)}</span></span></div>`});
+ out.innerHTML=h+'</div>'}
+async function openComic(alias){const out=$('out');out.innerHTML='<h3>กำลังโหลดรายละเอียด…</h3>';
+ const r=await fetch('/api/lz/detail?'+new URLSearchParams({alias}));const j=await r.json();
+ if(!r.ok||j.error){out.innerHTML=`<div class=err>${esc(j.error||'โหลดไม่สำเร็จ')}</div>`;return}
+ let h=`<span class=back onclick=search()>← กลับผลการค้นหา</span><div class=head><img src="${esc(j.cover)}" onerror="this.hidden=true"><div><h2>${esc(j.title)}</h2><div class=artist>${esc(j.artists||'—')}</div><div class=genre>${esc((j.genres||[]).join(', '))} · <span class=age>${esc(j.rating)}</span></div><div class=synopsis>${esc(j.synopsis)}</div></div></div><h3>ตอนทั้งหมด <span class=count>${(j.episodes||[]).length}</span></h3>`;
+ (j.episodes||[]).forEach(e=>{h+=`<div class=ep><span class=n>${String(e.seq).padStart(2,'0')}</span><img loading=lazy src="${esc(e.cover)}" onerror="this.hidden=true"><span class=t>${esc(e.title)}</span><span>${e.purchased?'<span class=owned>ซื้อแล้ว</span>':(e.coin?'<span class=coin>'+e.coin+' 코인</span>':'<span class=coin>ฟรี</span>')}</span><button class=zip onclick="download('${esc(alias)}',${e.seq},this)">ZIP</button></div>`});
+ out.innerHTML=h}
+async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำลังซื้อ/โหลด…';
+ try{const r=await fetch('/api/lz/download?'+new URLSearchParams({alias,seq}));
+  if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));alert(e.error||'โหลดไม่สำเร็จ');return}
+  const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');
+  a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
+ }finally{btn.disabled=false;btn.textContent='ZIP'}}
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
 
@@ -1644,6 +1712,47 @@ class H(BaseHTTPRequestHandler):
             return
         mz = re.match(r"^/ep/(\d+)\.zip$", p)
         mr = re.match(r"^/ep/(\d+)/?$", p)
+        def _html(data):
+            b = data.encode("utf-8") if isinstance(data, str) else data
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        if p in ("/", "/lezhin", "/lz"):
+            return _html(LZ_PAGE)
+        if p == "/ridi":
+            return _html(PAGE)
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if p == "/api/lz/search":
+            try:
+                return self._json(LZ.search((qs.get("q") or [""])[0].strip(),
+                                            int((qs.get("limit") or ["30"])[0])))
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
+        if p == "/api/lz/detail":
+            alias = (qs.get("alias") or [""])[0].strip("/")
+            try:
+                return self._json(LZ.detail(alias))
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
+        if p == "/api/lz/balance":
+            try:
+                return self._json(LZ.balance())
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
+        if p == "/api/lz/download":
+            alias = (qs.get("alias") or [""])[0].strip("/")
+            seq = (qs.get("seq") or ["0"])[0]
+            try:
+                info, episode, filename, data = LZ.download(alias, seq)
+                fn = urllib.parse.quote(filename + ".zip")
+                ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", filename)[:70].strip() or (alias + "-" + str(seq))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
+                self.send_header("Content-Length", str(len(data))); self.end_headers()
+                self.wfile.write(data); return
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
         if p == "/api/debug/uri":
             if os.environ.get("DEBUG_URI_ENDPOINT") != "1":
                 return self._json({"ok": False, "error": "debug endpoint disabled"}, 403)
@@ -1845,5 +1954,5 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"RIDI Webtoon DL listening on 0.0.0.0:{PORT}", flush=True)
+    print(f"LEZHIN DL listening on 0.0.0.0:{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
