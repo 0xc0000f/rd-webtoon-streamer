@@ -110,6 +110,34 @@ def descramble_image(data, episode_id):
     return buffer.getvalue()
 
 
+class _ZipStream:
+    def __init__(self):
+        self._buffer = bytearray()
+        self._position = 0
+
+    def write(self, data):
+        if isinstance(data, memoryview):
+            data = bytes(data)
+        self._buffer.extend(data)
+        self._position += len(data)
+
+    def tell(self):
+        return self._position
+
+    def flush(self):
+        pass
+
+    def seekable(self):
+        return False
+
+    def take(self):
+        if not self._buffer:
+            return b""
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        return data
+
+
 class LezhinWeb:
     def __init__(self):
         self.data_dir = Path(os.environ.get("LEZHIN_DATA_DIR") or os.environ.get("DOWNLOAD_DATA_DIR") or "/app/data")
@@ -602,13 +630,13 @@ class LezhinWeb:
                     if info["image_shuffle"]:
                         data = descramble_image(data, episode["id"])
                     return data
-                except requests.HTTPError as error:
+                except requests.RequestException as error:
                     status = getattr(error.response, "status_code", 0)
-                    if status < 500 or attempt == 4:
-                        raise
-                    time.sleep(0.4 * (attempt + 1))
-                except (requests.ConnectionError, requests.Timeout):
-                    if attempt == 4:
+                    transient = isinstance(
+                        error,
+                        (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError),
+                    ) or status >= 500
+                    if not transient or attempt == 4:
                         raise
                     time.sleep(0.4 * (attempt + 1))
 
@@ -632,10 +660,10 @@ class LezhinWeb:
         if not episode:
             raise LezhinError("episode not found")
         filename, pages = self._prepared_episode(info, episode, buy=buy)
-        return info, episode, filename, pages()
+        return info, episode, filename, pages
 
-    def download_episodes(self, alias, seqs, buy=False):
-        info = self.detail(alias)
+    @staticmethod
+    def _ordered_seq_selection(info, seqs):
         by_seq = {int(x.get("seq") or 0): x for x in info.get("episodes", [])}
         ordered = []
         missing = []
@@ -653,13 +681,18 @@ class LezhinWeb:
                 missing.append(value)
                 continue
             ordered.append(value)
-        if not ordered:
-            raise LezhinError("no valid episodes selected")
+        return by_seq, ordered, missing
 
-        stream = io.BytesIO()
-        done = []
-        errors = {}
-        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+    def download_episodes_stream(self, alias, seqs, buy=False):
+        info = self.detail(alias)
+        by_seq, ordered, missing = self._ordered_seq_selection(info, seqs)
+        meta = {"done": [], "errors": {}, "missing": missing}
+        if not ordered:
+            return info, meta, None
+
+        def chunks():
+            stream = _ZipStream()
+            archive = zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
             for seq in ordered:
                 last_error = None
                 for attempt in range(2):
@@ -669,24 +702,39 @@ class LezhinWeb:
                         prefix = f"{seq:03d} {filename}"[:120]
                         for index, data in enumerate(pages, start=1):
                             files.append((f"{prefix}/page_{index:03d}.webp", data))
-                        if files:
-                            for name, data in files:
-                                archive.writestr(name, data)
-                            done.append(seq)
-                            last_error = None
-                        else:
-                            last_error = ValueError("no pages")
+                        if not files:
+                            raise ValueError("no pages")
+                        for name, data in files:
+                            archive.writestr(name, data)
+                        meta["done"].append(seq)
+                        last_error = None
                         break
                     except Exception as error:
                         last_error = error
                         if attempt == 0:
                             time.sleep(1)
                 if last_error is not None:
-                    errors[seq] = str(last_error)
-        if not done:
-            raise LezhinError(errors.get(ordered[0], "no episodes downloaded"))
-        stream.seek(0)
-        return info, stream.read(), done, errors, missing
+                    meta["errors"][seq] = str(last_error)
+                yield stream.take()
+            archive.writestr(
+                "_download_report.json",
+                json.dumps(meta, ensure_ascii=False, indent=2),
+            )
+            archive.close()
+            yield stream.take()
+
+        return info, meta, chunks()
+
+    def download_episodes(self, alias, seqs, buy=False):
+        info, meta, chunks = self.download_episodes_stream(alias, seqs, buy=buy)
+        if chunks is None:
+            raise LezhinError("no valid episodes selected")
+        blob = b"".join(chunks)
+        if not meta["done"]:
+            ordered = [int(x.get("seq") or 0) for x in info.get("episodes", [])
+                       if str(x.get("seq")) and x.get("seq") in meta["errors"]]
+            raise LezhinError(meta["errors"].get(ordered[0], "no episodes downloaded"))
+        return info, blob, meta["done"], meta["errors"], meta["missing"]
 
     @staticmethod
     def stream_zip(info, episode, filename, pages):
@@ -725,3 +773,7 @@ def download(alias, seq):
 
 def download_many(alias, seqs, buy=False):
     return APP.download_episodes(alias, seqs, buy=buy)
+
+
+def stream_many(alias, seqs, buy=False):
+    return APP.download_episodes_stream(alias, seqs, buy=buy)

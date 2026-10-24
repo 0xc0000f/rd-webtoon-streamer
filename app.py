@@ -1486,7 +1486,7 @@ async function search(){const q=$('q').value.trim();if(!q)return;const out=$('ou
  out.innerHTML=h+'</div>'}
 let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set();
 function lzSeqs(){return [...LZ_SEL].sort((a,b)=>a-b)}
-function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn)btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน';
+function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn){btn.disabled=!n;btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน'}
  document.querySelectorAll('.lzep').forEach(x=>{LZ_SEL.has(+x.value)?x.checked=true:x.checked=false})}
 function lzSelect(fn){LZ_SEL.clear();LZ_EPISODES.filter(fn).forEach(e=>LZ_SEL.add(e.seq));lzUpdate()}
 function lzClear(){LZ_SEL.clear();lzUpdate()}
@@ -1509,11 +1509,12 @@ async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เ�
  btn.disabled=true;const old=btn.textContent;btn.textContent='กำลังโหลด…';
  try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked})});
   if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));alert(e.error||'โหลดไม่สำเร็จ');return}
-  let meta={};try{meta=JSON.parse(decodeURIComponent(r.headers.get('X-LZ-Result')||''))}catch(_){}
-  const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');
+  const parts=[];let total=0;
+  if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;btn.textContent=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength}
+  const blob=new Blob(parts,{type:r.headers.get('Content-Type')||'application/zip'});
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
-  const errs=meta.errors||{};const missing=meta.missing||[];
-  if(missing.length||Object.keys(errs).length){const first=Object.values(errs)[0]||'';alert(`โหลดสำเร็จ ${meta.done?meta.done.length:0}/${seqs.length} ตอน${first?' · '+first:''}`)}
+  alert(`บันทึก ZIP ${seqs.length} ตอนแล้ว (${(total/1048576).toFixed(1)}MB) · มี log ใน _download_report.json`);
  }finally{btn.disabled=false;btn.textContent=old;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
@@ -1556,6 +1557,8 @@ def check_auth(handler):
 
 
 class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *a):
         pass
 
@@ -1578,6 +1581,18 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _chunk(self, data):
+        if not data:
+            return
+        self.wfile.write(b"%X\r\n" % len(data))
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+    def _end_chunk(self):
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def do_POST(self):
         if not check_auth(self):
@@ -1638,22 +1653,40 @@ class H(BaseHTTPRequestHandler):
                 seqs = [int(x) for x in raw if str(x).strip()]
             except (TypeError, ValueError):
                 return self._json({"error": "invalid episode list"}, 400)
+            if not seqs:
+                return self._json({"error": "invalid episode list"}, 400)
             try:
-                info, blob, done, errors, missing = LZ.download_many(alias, seqs, bool(data.get("buy")))
+                info, meta, chunks = LZ.stream_many(alias, seqs, bool(data.get("buy")))
+                if chunks is None:
+                    return self._json(meta, 400)
+                selected = sorted(set(seqs))
                 title = info.get("title") or alias
-                label = title if len(done) == 1 else f"{title} {done[0]}-{done[-1]}"
+                label = title if len(selected) == 1 else f"{title} {selected[0]}-{selected[-1]}"
                 ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", label)[:70].strip() or alias
                 fn = urllib.parse.quote(label + ".zip")
-                meta = urllib.parse.quote(json.dumps(
-                    {"done": done, "errors": errors, "missing": missing}, ensure_ascii=False))
+                iterator = iter(chunks)
+                first = None
+                while first is None:
+                    try:
+                        part = next(iterator)
+                    except StopIteration:
+                        break
+                    if part:
+                        first = part
+                if first is None:
+                    return self._json(meta, 500)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
                 self.send_header("Content-Disposition",
                                  f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
-                self.send_header("X-LZ-Result", meta[:4000])
-                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
-                self.wfile.write(blob)
+                try:
+                    self._chunk(first)
+                    for part in iterator:
+                        self._chunk(part)
+                finally:
+                    self._end_chunk()
                 return
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
