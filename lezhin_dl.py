@@ -261,8 +261,7 @@ class LezhinWeb:
             self._genres[item["id"]] = names.get("ko-KR") or names.get("en-US") or item["id"]
         return self._genres
 
-    def search(self, query, limit=30):
-        self.login()
+    def _advanced_search_items(self, query, limit):
         response = self._request(
             "GET",
             f"{API_ROOT}/lz-api/v2/advanced-search",
@@ -277,24 +276,58 @@ class LezhinWeb:
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") != 0:
-            raise LezhinError(str(payload))
-        items = []
-        for item in payload.get("data", []):
-            artists = ", ".join(x.get("name", "") for x in item.get("artists", []) if x.get("name"))
-            cover = f"{CDN_PUBLIC_ROOT}/v2/comics/{item['id']}/images/tall.jpg?updated={item.get('updatedAt', 0)}&width=420"
-            items.append(
-                {
-                    "id": int(item["id"]),
-                    "alias": item.get("alias"),
-                    "title": item.get("title", "").replace(" [연재]", ""),
-                    "artists": artists,
-                    "genres": item.get("genres") or [],
-                    "cover": cover,
-                    "rating": "19+" if item.get("adult") else "ALL",
-                    "updated": int(item.get("updatedAt") or 0),
-                }
-            )
-        return {"q": query, "count": int(payload.get("count") or len(items)), "items": items}
+            return 0, []
+        return int(payload.get("count") or 0), [
+            self._search_item(item)
+            for item in payload.get("data", [])
+            if item.get("id") and item.get("alias")
+        ]
+
+    @staticmethod
+    def _search_item(item):
+        artists = ", ".join(x.get("name", "") for x in item.get("artists", []) if x.get("name"))
+        cover = f"{CDN_PUBLIC_ROOT}/v2/comics/{item['id']}/images/tall.jpg?updated={item.get('updatedAt', 0)}&width=420"
+        return {
+            "id": int(item["id"]),
+            "alias": item.get("alias"),
+            "title": item.get("title", "").replace(" [연재]", ""),
+            "artists": artists,
+            "genres": item.get("genres") or [],
+            "cover": cover,
+            "rating": "19+" if item.get("adult") else "ALL",
+            "updated": int(item.get("updatedAt") or 0),
+        }
+
+    def search(self, query, limit=30):
+        self.login()
+        query = (query or "").strip()
+        if not query:
+            return {"q": query, "count": 0, "items": []}
+        try:
+            total, items = self._advanced_search_items(query, limit)
+        except requests.HTTPError as error:
+            if error.response is None or error.response.status_code < 400 or error.response.status_code >= 500:
+                raise
+            total, items = 0, []
+        except (requests.ConnectionError, requests.Timeout):
+            raise
+        if total == 0 and len(query.split()) > 1:
+            merged = {}
+            for token in query.split():
+                token = token.strip()
+                if len(token) < 2:
+                    continue
+                try:
+                    _, found = self._advanced_search_items(token, limit)
+                except (requests.HTTPError, requests.ConnectionError, requests.Timeout):
+                    continue
+                for item in found:
+                    key = item["alias"]
+                    if key not in merged:
+                        merged[key] = item
+            fallback = sorted(merged.values(), key=lambda item: item["updated"], reverse=True)[:limit]
+            return {"q": query, "count": len(fallback), "items": fallback}
+        return {"q": query, "count": total, "items": items}
 
     def _rsc_body(self, alias):
         response = self._request(

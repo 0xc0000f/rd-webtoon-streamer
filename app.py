@@ -1207,7 +1207,7 @@ def start_job(bids, cache=False):
 # ---------------- UI ----------------
 PAGE = r"""<!doctype html><html lang=th><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>LEZHIN DL · RIDI</title><style>
+<title>RIDI DL</title><style>
 :root{--pink:#ff4081;--bg:#101014;--card:#191922;--line:#272733}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eee;
 font-family:'Noto Sans',system-ui,sans-serif}
@@ -1257,10 +1257,10 @@ select,input[type=number]{background:var(--card);border:1px solid var(--line);co
 padding:7px 10px;border-radius:8px;font-size:13px}
 </style></head><body>
 <div id=pbar></div>
-<header><div class=logo>🔷 LEZHIN DL · RIDI</div>
+<header><div class=logo>🔷 RIDI DL</div>
 <input id=q type=text placeholder="พิมพ์ชื่อเรื่อง หรือวาง URL/รหัสตอน">
 <button onclick=search()>ค้นหา</button><span class=pill id=wlab>idle</span>
-<span class=pill id=poolpill style=color:#ffd479>identity pool …</span></header>
+<span class=pill id=poolpill style=color:#ffd479>identity pool …</span>__CROSS_LINK__</header>
 <main id=out></main>
 <section class=cachewrap id=resultbox style=display:none></section>
 <section class=cachewrap id=cache></section>
@@ -1466,7 +1466,7 @@ main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
 </style></head><body>
 <header><div class=logo>LEZHIN DL</div><span class=sub>Episode ZIP Downloader</span>
 <input id=q type=text placeholder="พิมพ์ชื่อเรื่อง Lezhin…"><button onclick=search()>ค้นหา</button>
-<a class=link href=/ridi>ใช้ RIDI เดิม</a></header>
+__CROSS_LINK__</header>
 <main id=out><h3>ค้นหาเรื่องจาก Lezhin แล้วเลือกเพื่อโหลด ZIP เป็นตอน</h3></main>
 <script>
 const $=id=>document.getElementById(id);
@@ -1495,6 +1495,19 @@ $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 
 AUTH_USER = os.environ.get("AUTH_USER", "")
 AUTH_PASS = os.environ.get("AUTH_PASS", "")   # set via Coolify .env only
+
+SITE_MODE = (os.environ.get("SITE_MODE") or "lezhin").strip().lower()
+RIDI_ONLY = SITE_MODE in {"ridi", "r", "r"}
+CROSS_URL = (os.environ.get("LEZHIN_URL" if RIDI_ONLY else "RIDI_URL") or "").strip()
+CROSS_LABEL = "ใช้ Lezhin DL" if RIDI_ONLY else "ใช้ RIDI เดิม"
+CROSS_LINK = (
+    f'<a class=link href="{html.escape(CROSS_URL)}" style="color:#9cf;font-size:13px;text-decoration:none;margin-left:auto">{CROSS_LABEL}</a>'
+    if CROSS_URL else ""
+)
+
+
+def _site_page(template):
+    return template.replace("__CROSS_LINK__", CROSS_LINK)
 
 
 def check_auth(handler):
@@ -1533,6 +1546,12 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+
+    def _redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_POST(self):
         if not check_auth(self):
@@ -1716,10 +1735,16 @@ class H(BaseHTTPRequestHandler):
             b = data.encode("utf-8") if isinstance(data, str) else data
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
-        if p in ("/", "/lezhin", "/lz"):
-            return _html(LZ_PAGE)
+        if p == "/":
+            return _html(_site_page(PAGE if RIDI_ONLY else LZ_PAGE))
+        if p in ("/lezhin", "/lz"):
+            if RIDI_ONLY:
+                return self._redirect(CROSS_URL or "/")
+            return _html(_site_page(LZ_PAGE))
         if p == "/ridi":
-            return _html(PAGE)
+            if not RIDI_ONLY:
+                return self._redirect(CROSS_URL or "/")
+            return _html(_site_page(PAGE))
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p == "/api/lz/search":
             try:
@@ -1954,5 +1979,5 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"LEZHIN DL listening on 0.0.0.0:{PORT}", flush=True)
+    print(f"{('RIDI' if RIDI_ONLY else 'LEZHIN')} DL listening on 0.0.0.0:{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
