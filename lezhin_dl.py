@@ -155,7 +155,7 @@ class LezhinWeb:
         if self.cookie_file.is_file():
             jar.load(ignore_discard=True, ignore_expires=True)
         encoded = os.environ.get("LEZHIN_COOKIES_B64")
-        if encoded and not list(jar):
+        if encoded and not any(cookie.name == "JSESSIONID" for cookie in jar):
             try:
                 self.cookie_file.write_bytes(base64.b64decode(encoded))
                 jar.load(ignore_discard=True, ignore_expires=True)
