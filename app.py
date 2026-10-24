@@ -1474,7 +1474,7 @@ main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
 <header><div class=logo>LEZHIN DL</div><span class=sub>Episode ZIP Downloader</span>
 <input id=q type=text placeholder="พิมพ์ชื่อเรื่อง Lezhin…"><button onclick=search()>ค้นหา</button>
 __CROSS_LINK__</header>
-<main id=out><h3>ค้นหาเรื่องจาก Lezhin แล้วเลือกเพื่อโหลด ZIP เป็นตอน</h3></main>
+<main id=out><h3>ค้นหาเรื่องจาก Lezhin แล้วเลือกเพื่อโหลด ZIP เดี่ยวหรือหลายตอน</h3></main>
 <script>
 const $=id=>document.getElementById(id);
 const esc=s=>(s+'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp'}[c]));
@@ -1484,18 +1484,37 @@ async function search(){const q=$('q').value.trim();if(!q)return;const out=$('ou
  let h=`<h3>${esc(q)} <span class=count>${j.count} เรื่อง</span></h3><div class=grid>`;
  (j.items||[]).forEach(x=>{h+=`<div class=card onclick="openComic('${esc(x.alias)}')"><img loading=lazy src="${esc(x.cover)}" onerror="this.hidden=true"><b>${esc(x.title)}</b><span>${esc(x.artists||'—')}<br><span class=age>${esc(x.rating)}</span></span></div>`});
  out.innerHTML=h+'</div>'}
+let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set();
+function lzSeqs(){return [...LZ_SEL].sort((a,b)=>a-b)}
+function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn)btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน';
+ document.querySelectorAll('.lzep').forEach(x=>{LZ_SEL.has(+x.value)?x.checked=true:x.checked=false})}
+function lzSelect(fn){LZ_SEL.clear();LZ_EPISODES.filter(fn).forEach(e=>LZ_SEL.add(e.seq));lzUpdate()}
+function lzClear(){LZ_SEL.clear();lzUpdate()}
+function lzZipName(prefix){return (prefix+': '+LZ_TITLE).replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim()+'.zip'}
 async function openComic(alias){const out=$('out');out.innerHTML='<h3>กำลังโหลดรายละเอียด…</h3>';
  const r=await fetch('/api/lz/detail?'+new URLSearchParams({alias}));const j=await r.json();
  if(!r.ok||j.error){out.innerHTML=`<div class=err>${esc(j.error||'โหลดไม่สำเร็จ')}</div>`;return}
- let h=`<span class=back onclick=search()>← กลับผลการค้นหา</span><div class=head><img src="${esc(j.cover)}" onerror="this.hidden=true"><div><h2>${esc(j.title)}</h2><div class=artist>${esc(j.artists||'—')}</div><div class=genre>${esc((j.genres||[]).join(', '))} · <span class=age>${esc(j.rating)}</span></div><div class=synopsis>${esc(j.synopsis)}</div></div></div><h3>ตอนทั้งหมด <span class=count>${(j.episodes||[]).length}</span></h3>`;
- (j.episodes||[]).forEach(e=>{h+=`<div class=ep><span class=n>${String(e.seq).padStart(2,'0')}</span><img loading=lazy src="${esc(e.cover)}" onerror="this.hidden=true"><span class=t>${esc(e.title)}</span><span>${e.purchased?'<span class=owned>ซื้อแล้ว</span>':(e.coin?'<span class=coin>'+e.coin+' 코인</span>':'<span class=coin>ฟรี</span>')}</span><button class=zip onclick="download('${esc(alias)}',${e.seq},this)">ZIP</button></div>`});
- out.innerHTML=h}
+ LZ_ALIAS=alias;LZ_TITLE=j.title||alias;LZ_EPISODES=j.episodes||[];LZ_SEL.clear();
+ let h=`<span class=back onclick=search()>← กลับผลการค้นหา</span><div class=head><img src="${esc(j.cover)}" onerror="this.hidden=true"><div><h2>${esc(j.title)}</h2><div class=artist>${esc(j.artists||'—')}</div><div class=genre>${esc((j.genres||[]).join(', '))} · <span class=age>${esc(j.rating)}</span></div><div class=synopsis>${esc(j.synopsis)}</div></div></div><h3>ตอนทั้งหมด <span class=count>${LZ_EPISODES.length}</span></h3>`;
+ h+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button onclick="lzSelect(e=>e.purchased||e.coin==0)">เลือกซื้อแล้ว/ฟรี</button><button onclick="lzSelect(()=>true)">เลือกทั้งหมด</button><button onclick="lzClear()">ล้าง</button><button id=lzdl onclick="lzDl(this)" disabled>เลือกตอนก่อน</button><label style="font-size:13px;color:#8996a3;display:flex;align-items:center;gap:5px"><input id=lzbuy type=checkbox>อนุญาตซื้อตอนที่เลือก</label></div>`;
+ LZ_EPISODES.forEach(e=>{h+=`<div class=ep><label class=n><input class=lzep type=checkbox value="${e.seq}" onchange="LZ_SEL.has(+this.value)?LZ_SEL.delete(+this.value):LZ_SEL.add(+this.value);lzUpdate()">${String(e.seq).padStart(2,'0')}</label><img loading=lazy src="${esc(e.cover)}" onerror="this.hidden=true"><span class=t>${esc(e.title)}</span><span>${e.purchased?'<span class=owned>ซื้อแล้ว</span>':(e.coin?'<span class=coin>'+e.coin+' 코인</span>':'<span class=coin>ฟรี</span>')}</span><button class=zip onclick="download('${esc(alias)}',${e.seq},this)">ZIP</button></div>`});
+ out.innerHTML=h;lzUpdate()}
 async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำลังซื้อ/โหลด…';
  try{const r=await fetch('/api/lz/download?'+new URLSearchParams({alias,seq}));
   if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));alert(e.error||'โหลดไม่สำเร็จ');return}
   const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
  }finally{btn.disabled=false;btn.textContent='ZIP'}}
+async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
+ btn.disabled=true;const old=btn.textContent;btn.textContent='กำลังโหลด…';
+ try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked})});
+  if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));alert(e.error||'โหลดไม่สำเร็จ');return}
+  let meta={};try{meta=JSON.parse(decodeURIComponent(r.headers.get('X-LZ-Result')||''))}catch(_){}
+  const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');
+  a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
+  const errs=meta.errors||{};const missing=meta.missing||[];
+  if(missing.length||Object.keys(errs).length){const first=Object.values(errs)[0]||'';alert(`โหลดสำเร็จ ${meta.done?meta.done.length:0}/${seqs.length} ตอน${first?' · '+first:''}`)}
+ }finally{btn.disabled=false;btn.textContent=old;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
@@ -1610,6 +1629,34 @@ class H(BaseHTTPRequestHandler):
             job = start_job(missing, cache=cache)
             self._json({"started": True, "missing": missing,
                         "token": getattr(job, "stream_tok", "")})
+        elif p == "/api/lz/download":
+            alias = str(data.get("alias") or "").strip().strip("/")
+            raw = data.get("seqs") or []
+            if isinstance(raw, str):
+                raw = re.split(r"[,\s]+", raw)
+            try:
+                seqs = [int(x) for x in raw if str(x).strip()]
+            except (TypeError, ValueError):
+                return self._json({"error": "invalid episode list"}, 400)
+            try:
+                info, blob, done, errors, missing = LZ.download_many(alias, seqs, bool(data.get("buy")))
+                title = info.get("title") or alias
+                label = title if len(done) == 1 else f"{title} {done[0]}-{done[-1]}"
+                ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", label)[:70].strip() or alias
+                fn = urllib.parse.quote(label + ".zip")
+                meta = urllib.parse.quote(json.dumps(
+                    {"done": done, "errors": errors, "missing": missing}, ensure_ascii=False))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
+                self.send_header("X-LZ-Result", meta[:4000])
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                self.wfile.write(blob)
+                return
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
         elif p == "/api/library":
             idx = lib_scan()
             series = {}
