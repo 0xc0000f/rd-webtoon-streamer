@@ -7,8 +7,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import lezhin_dl as LZ
 
-PORT = int(os.environ.get("PORT", 3000))
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "16"))
+def _env_int(name, default):
+    raw = (os.environ.get(name) or "").strip().strip("'\"")
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+PORT = _env_int("PORT", 3000)
+MAX_WORKERS = _env_int("MAX_WORKERS", 16)
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DOWNLOAD_DATA_DIR", APP_ROOT)
 DL_DIRS = [os.path.join(DATA_DIR, "w%02d" % i) for i in range(48)]
@@ -609,10 +616,10 @@ LANE_IDX = [0]
 POOL_DIR = os.path.join(DATA_DIR, "pool")
 # unbounded identity farming (user order 2026-10-23): farm forever, staggered.
 # POOL_TARGET=0 means no ceiling; a positive value is only an optional floor.
-POOL_TARGET = int(os.environ.get("POOL_TARGET", "0") or 0)
+POOL_TARGET = _env_int("POOL_TARGET", 0)
 POOL_UNBOUNDED = POOL_TARGET <= 0 or POOL_TARGET >= 100
 POOL_LIMIT = POOL_TARGET if POOL_TARGET > 0 else None
-PREWARM_CONC = int(os.environ.get("PREWARM_CONC", "6"))
+PREWARM_CONC = _env_int("PREWARM_CONC", 6)
 
 
 def rotate_logs():
