@@ -655,7 +655,7 @@ class LezhinWeb:
         base = f"{CDN_IMAGE_ROOT}/v2/comics/{comic_id}/episodes/{episode['id']}/contents/scrolls"
         return base, query
 
-    def _prepared_episode(self, info, episode, buy=True):
+    def _prepared_episode(self, info, episode, buy=True, page_total=None):
         if episode.get("not_for_sale"):
             raise LezhinError("episode is not sold separately")
         purchased = bool(episode.get("purchased"))
@@ -674,7 +674,8 @@ class LezhinWeb:
         if not purchased and int(episode.get("coin") or 0) > 0:
             raise LezhinError("episode is not purchased")
         base, query = self._signed_episode(info["comic_id"], episode, purchased)
-        page_total = self._count_pages(base, query)
+        if page_total is None:
+            page_total = self._count_pages(base, query)
         filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{info['title']} {episode['title']}").strip()
         seq = int(episode.get("seq") or 0)
         if not filename:
@@ -765,22 +766,41 @@ class LezhinWeb:
         if not ordered:
             return info, meta, None
 
+        preknown = {}
+        unknown = set()
+        for value in ordered:
+            ep = by_seq[value]
+            if ep.get("purchased") or int(ep.get("coin") or 0) == 0:
+                base, query = self._signed_episode(info["comic_id"], ep, bool(ep.get("purchased")))
+                count = self._count_pages(base, query)
+                if count is None:
+                    unknown.add(value)
+                else:
+                    preknown[value] = count
+            else:
+                unknown.add(value)
+        planned_total = sum(preknown.values())
+
         def chunks():
             stream = _ZipStream()
             archive = zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
-            meta["planned_pages"] = 0
+            pending = set(unknown)
+            planned = planned_total
+            meta["planned_pages"] = planned
             self._set_progress(alias=alias, episode_i=0, episode_total=len(ordered), seq=0,
-                               page=0, episode_pages=None, planned=None, pages_all=0)
-            planned = 0
+                               page=0, episode_pages=None, planned=planned if not pending else None, pages_all=0)
             try:
                 for index, seq in enumerate(ordered, start=1):
                     written = 0
                     try:
-                        filename, pages, page_total = self._prepared_episode(info, by_seq[seq], buy=buy)
-                        planned += page_total or 0
+                        filename, pages, page_total = self._prepared_episode(
+                            info, by_seq[seq], buy=buy, page_total=preknown.get(seq))
+                        if seq in pending:
+                            planned += page_total or 0
+                            pending.discard(seq)
                         meta["planned_pages"] = planned
                         self._set_progress(episode_i=index, seq=seq, page=0, episode_pages=page_total,
-                                           planned=planned if index == len(ordered) else None,
+                                           planned=planned if not pending else None,
                                            pages_all=meta["pages_downloaded"])
                         prefix = f"{seq:03d} {filename}"[:120]
                         for page_no, data in enumerate(pages, start=1):
@@ -796,6 +816,9 @@ class LezhinWeb:
                         meta["done"].append(seq)
                     except Exception as error:
                         meta["errors"][seq] = str(error)
+                        pending.discard(seq)
+                        meta["planned_pages"] = planned
+                        self._set_progress(planned=planned if not pending else None)
                         if written:
                             meta["partial"][seq] = written
                         part = stream.take()
