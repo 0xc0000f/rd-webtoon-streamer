@@ -686,42 +686,51 @@ class LezhinWeb:
     def download_episodes_stream(self, alias, seqs, buy=False):
         info = self.detail(alias)
         by_seq, ordered, missing = self._ordered_seq_selection(info, seqs)
-        meta = {"done": [], "errors": {}, "missing": missing}
+        meta = {
+            "done": [],
+            "errors": {},
+            "missing": missing,
+            "partial": {},
+            "pages_downloaded": 0,
+        }
         if not ordered:
             return info, meta, None
 
         def chunks():
             stream = _ZipStream()
             archive = zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
-            for seq in ordered:
-                last_error = None
-                for attempt in range(2):
-                    files = []
+            try:
+                for seq in ordered:
+                    written = 0
                     try:
                         filename, pages = self._prepared_episode(info, by_seq[seq], buy=buy)
                         prefix = f"{seq:03d} {filename}"[:120]
                         for index, data in enumerate(pages, start=1):
-                            files.append((f"{prefix}/page_{index:03d}.webp", data))
-                        if not files:
+                            archive.writestr(f"{prefix}/page_{index:03d}.webp", data)
+                            written += 1
+                            meta["pages_downloaded"] += 1
+                            part = stream.take()
+                            if part:
+                                yield part
+                        if not written:
                             raise ValueError("no pages")
-                        for name, data in files:
-                            archive.writestr(name, data)
                         meta["done"].append(seq)
-                        last_error = None
-                        break
                     except Exception as error:
-                        last_error = error
-                        if attempt == 0:
-                            time.sleep(1)
-                if last_error is not None:
-                    meta["errors"][seq] = str(last_error)
-                yield stream.take()
-            archive.writestr(
-                "_download_report.json",
-                json.dumps(meta, ensure_ascii=False, indent=2),
-            )
-            archive.close()
-            yield stream.take()
+                        meta["errors"][seq] = str(error)
+                        if written:
+                            meta["partial"][seq] = written
+                        part = stream.take()
+                        if part:
+                            yield part
+            finally:
+                archive.writestr(
+                    "_download_report.json",
+                    json.dumps(meta, ensure_ascii=False, indent=2),
+                )
+                archive.close()
+                part = stream.take()
+                if part:
+                    yield part
 
         return info, meta, chunks()
 
@@ -731,9 +740,7 @@ class LezhinWeb:
             raise LezhinError("no valid episodes selected")
         blob = b"".join(chunks)
         if not meta["done"]:
-            ordered = [int(x.get("seq") or 0) for x in info.get("episodes", [])
-                       if str(x.get("seq")) and x.get("seq") in meta["errors"]]
-            raise LezhinError(meta["errors"].get(ordered[0], "no episodes downloaded"))
+            raise LezhinError(next(iter(meta["errors"].values()), "no episodes downloaded"))
         return info, blob, meta["done"], meta["errors"], meta["missing"]
 
     @staticmethod

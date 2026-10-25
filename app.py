@@ -1484,7 +1484,8 @@ async function search(){const q=$('q').value.trim();if(!q)return;const out=$('ou
  let h=`<h3>${esc(q)} <span class=count>${j.count} เรื่อง</span></h3><div class=grid>`;
  (j.items||[]).forEach(x=>{h+=`<div class=card onclick="openComic('${esc(x.alias)}')"><img loading=lazy src="${esc(x.cover)}" onerror="this.hidden=true"><b>${esc(x.title)}</b><span>${esc(x.artists||'—')}<br><span class=age>${esc(x.rating)}</span></span></div>`});
  out.innerHTML=h+'</div>'}
-let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set();
+let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set(),LZ_AC=null;
+function lzStop(){if(LZ_AC)LZ_AC.abort()}
 function lzSeqs(){return [...LZ_SEL].sort((a,b)=>a-b)}
 function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn){btn.disabled=!n;btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน'}
  document.querySelectorAll('.lzep').forEach(x=>{LZ_SEL.has(+x.value)?x.checked=true:x.checked=false})}
@@ -1496,7 +1497,7 @@ async function openComic(alias){const out=$('out');out.innerHTML='<h3>กำล�
  if(!r.ok||j.error){out.innerHTML=`<div class=err>${esc(j.error||'โหลดไม่สำเร็จ')}</div>`;return}
  LZ_ALIAS=alias;LZ_TITLE=j.title||alias;LZ_EPISODES=j.episodes||[];LZ_SEL.clear();
  let h=`<span class=back onclick=search()>← กลับผลการค้นหา</span><div class=head><img src="${esc(j.cover)}" onerror="this.hidden=true"><div><h2>${esc(j.title)}</h2><div class=artist>${esc(j.artists||'—')}</div><div class=genre>${esc((j.genres||[]).join(', '))} · <span class=age>${esc(j.rating)}</span></div><div class=synopsis>${esc(j.synopsis)}</div></div></div><h3>ตอนทั้งหมด <span class=count>${LZ_EPISODES.length}</span></h3>`;
- h+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button onclick="lzSelect(e=>e.purchased||e.coin==0)">เลือกซื้อแล้ว/ฟรี</button><button onclick="lzSelect(()=>true)">เลือกทั้งหมด</button><button onclick="lzClear()">ล้าง</button><button id=lzdl onclick="lzDl(this)" disabled>เลือกตอนก่อน</button><label style="font-size:13px;color:#8996a3;display:flex;align-items:center;gap:5px"><input id=lzbuy type=checkbox>อนุญาตซื้อตอนที่เลือก</label></div>`;
+ h+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button onclick="lzSelect(e=>e.purchased||e.coin==0)">เลือกซื้อแล้ว/ฟรี</button><button onclick="lzSelect(()=>true)">เลือกทั้งหมด</button><button onclick="lzClear()">ล้าง</button><button id=lzdl onclick="lzDl(this)" disabled>เลือกตอนก่อน</button><button id=lzstop onclick="lzStop()" hidden>หยุด</button><label style="font-size:13px;color:#8996a3;display:flex;align-items:center;gap:5px"><input id=lzbuy type=checkbox>อนุญาตซื้อตอนที่เลือก</label></div>`;
  LZ_EPISODES.forEach(e=>{h+=`<div class=ep><label class=n><input class=lzep type=checkbox value="${e.seq}" onchange="LZ_SEL.has(+this.value)?LZ_SEL.delete(+this.value):LZ_SEL.add(+this.value);lzUpdate()">${String(e.seq).padStart(2,'0')}</label><img loading=lazy src="${esc(e.cover)}" onerror="this.hidden=true"><span class=t>${esc(e.title)}</span><span>${e.purchased?'<span class=owned>ซื้อแล้ว</span>':(e.coin?'<span class=coin>'+e.coin+' 코인</span>':'<span class=coin>ฟรี</span>')}</span><button class=zip onclick="download('${esc(alias)}',${e.seq},this)">ZIP</button></div>`});
  out.innerHTML=h;lzUpdate()}
 async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำลังซื้อ/โหลด…';
@@ -1506,16 +1507,21 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
  }finally{btn.disabled=false;btn.textContent='ZIP'}}
 async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
- btn.disabled=true;const old=btn.textContent;btn.textContent='กำลังโหลด…';
- try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked})});
-  if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));alert(e.error||'โหลดไม่สำเร็จ');return}
-  const parts=[];let total=0;
-  if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;btn.textContent=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength}
+ btn.disabled=true;const old=btn.textContent;let status='กำลังโหลด…';let total=0;const stop=$('lzstop');if(stop){stop.hidden=false;stop.disabled=false}
+ LZ_AC=new AbortController();
+ try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked}),signal:LZ_AC.signal});
+  if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));throw new Error(e.error||'โหลดไม่สำเร็จ')}
+  const parts=[];
+  if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;status=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;btn.textContent=status}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength;status=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;btn.textContent=status}
   const blob=new Blob(parts,{type:r.headers.get('Content-Type')||'application/zip'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
+  status=`บันทึก ${seqs.length} ตอน (${(total/1048576).toFixed(1)}MB)`;
   alert(`บันทึก ZIP ${seqs.length} ตอนแล้ว (${(total/1048576).toFixed(1)}MB) · มี log ใน _download_report.json`);
- }finally{btn.disabled=false;btn.textContent=old;lzUpdate()}}
+ }catch(e){
+  status=e.name==='AbortError'?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:'โหลดไม่สำเร็จ';
+  if(e.name!=='AbortError')alert(e.message||'โหลดไม่สำเร็จ');
+ }finally{LZ_AC=null;if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
@@ -1685,8 +1691,13 @@ class H(BaseHTTPRequestHandler):
                     self._chunk(first)
                     for part in iterator:
                         self._chunk(part)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 finally:
-                    self._end_chunk()
+                    try:
+                        self._end_chunk()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                 return
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
