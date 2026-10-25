@@ -1484,8 +1484,8 @@ async function search(){const q=$('q').value.trim();if(!q)return;const out=$('ou
  let h=`<h3>${esc(q)} <span class=count>${j.count} เรื่อง</span></h3><div class=grid>`;
  (j.items||[]).forEach(x=>{h+=`<div class=card onclick="openComic('${esc(x.alias)}')"><img loading=lazy src="${esc(x.cover)}" onerror="this.hidden=true"><b>${esc(x.title)}</b><span>${esc(x.artists||'—')}<br><span class=age>${esc(x.rating)}</span></span></div>`});
  out.innerHTML=h+'</div>'}
-let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set(),LZ_AC=null;
-function lzStop(){if(LZ_AC)LZ_AC.abort()}
+let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set(),LZ_AC=null,LZ_KEY='';
+async function lzStop(){try{if(LZ_KEY)await fetch('/api/lz/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:LZ_KEY})})}catch(e){}if(LZ_AC)LZ_AC.abort()}
 function lzSeqs(){return [...LZ_SEL].sort((a,b)=>a-b)}
 function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn){btn.disabled=!n;btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน'}
  document.querySelectorAll('.lzep').forEach(x=>{LZ_SEL.has(+x.value)?x.checked=true:x.checked=false})}
@@ -1507,6 +1507,7 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
  }finally{btn.disabled=false;btn.textContent='ZIP'}}
  async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
+ LZ_KEY='k'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
  btn.disabled=true;const old=btn.textContent;let status='กำลังโหลด…';let total=0;const stop=$('lzstop');if(stop){stop.hidden=false;stop.disabled=false}
  let prog={},live=true;
  const lzStatus=()=>{let s=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;
@@ -1514,9 +1515,9 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
    if(prog.episode_pages)s+=` · หน้าง ${prog.page}/${prog.episode_pages}`;
    if(prog.planned)s+=` · ${Math.round(100*(prog.pages_all||0)/prog.planned)}%`}
   return s};
- const poll=(async()=>{while(live){try{const x=await(await fetch('/api/lz/progress')).json();if(x&&x.alias)prog=x}catch(e){}await new Promise(s=>setTimeout(s,1200))}})();
+ const poll=(async()=>{while(live){try{const x=await(await fetch('/api/lz/progress?key='+encodeURIComponent(LZ_KEY))).json();if(x&&x.alias)prog=x}catch(e){}await new Promise(s=>setTimeout(s,1200))}})();
  LZ_AC=new AbortController();
- try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked}),signal:LZ_AC.signal});
+ try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked,key:LZ_KEY}),signal:LZ_AC.signal});
   if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));throw new Error(e.error||'โหลดไม่สำเร็จ')}
   const parts=[];
   if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;status=lzStatus();btn.textContent=status}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength;status=lzStatus();btn.textContent=status}
@@ -1528,7 +1529,7 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
  }catch(e){
   status=e.name==='AbortError'?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:'โหลดไม่สำเร็จ';
   if(e.name!=='AbortError')alert(e.message||'โหลดไม่สำเร็จ');
- }finally{live=false;LZ_AC=null;if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
+ }finally{live=false;LZ_AC=null;LZ_KEY='';if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
@@ -1657,6 +1658,9 @@ class H(BaseHTTPRequestHandler):
             job = start_job(missing, cache=cache)
             self._json({"started": True, "missing": missing,
                         "token": getattr(job, "stream_tok", "")})
+        elif p == "/api/lz/cancel":
+            LZ.cancel(str(data.get("key") or ""))
+            return self._json({"ok": True})
         elif p == "/api/lz/download":
             alias = str(data.get("alias") or "").strip().strip("/")
             raw = data.get("seqs") or []
@@ -1669,7 +1673,7 @@ class H(BaseHTTPRequestHandler):
             if not seqs:
                 return self._json({"error": "invalid episode list"}, 400)
             try:
-                info, meta, chunks = LZ.stream_many(alias, seqs, bool(data.get("buy")))
+                info, meta, chunks = LZ.stream_many(alias, seqs, bool(data.get("buy")), key=str(data.get("key") or ""))
                 if chunks is None:
                     return self._json(meta, 400)
                 selected = sorted(set(seqs))
@@ -1875,7 +1879,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as error:
                 return self._json({"ok": False, "error": str(error)}, 500)
         if p == "/api/lz/progress":
-            return self._json(LZ.progress())
+            return self._json(LZ.progress((qs.get("key") or [""])[0]))
         if p == "/api/lz/download":
             alias = (qs.get("alias") or [""])[0].strip("/")
             seq = (qs.get("seq") or ["0"])[0]

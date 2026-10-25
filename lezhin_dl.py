@@ -32,6 +32,10 @@ class LezhinError(RuntimeError):
     pass
 
 
+class _DownloadCancelled(Exception):
+    pass
+
+
 def _decode_jwt_payload(token):
     try:
         payload = token.split(".")[1]
@@ -172,6 +176,7 @@ class LezhinWeb:
         self._counts_lock = threading.Lock()
         self._progress = {}
         self._progress_lock = threading.Lock()
+        self._cancelled = set()
         self._genres = {}
 
     def _load_token(self):
@@ -274,13 +279,21 @@ class LezhinWeb:
         with self._counts_lock:
             return dict(self._req_counts)
 
-    def _set_progress(self, **values):
+    def _set_progress(self, key="", **values):
         with self._progress_lock:
-            self._progress.update(values)
+            self._progress.setdefault(key, {}).update(values)
 
-    def progress(self):
+    def progress(self, key=""):
         with self._progress_lock:
-            return dict(self._progress)
+            return dict(self._progress.get(key) or {})
+
+    def cancel(self, key=""):
+        with self._progress_lock:
+            self._cancelled.add(key)
+
+    def _is_cancelled(self, key):
+        with self._progress_lock:
+            return key in self._cancelled
 
     def _page_exists(self, base, query, number):
         self._count_request(True, "HEAD", f"{base}/{number}.webp")
@@ -753,7 +766,7 @@ class LezhinWeb:
             ordered.append(value)
         return by_seq, ordered, missing
 
-    def download_episodes_stream(self, alias, seqs, buy=False):
+    def download_episodes_stream(self, alias, seqs, buy=False, key=""):
         info = self.detail(alias)
         by_seq, ordered, missing = self._ordered_seq_selection(info, seqs)
         meta = {
@@ -765,6 +778,9 @@ class LezhinWeb:
         }
         if not ordered:
             return info, meta, None
+        key = str(key or "")
+        with self._progress_lock:
+            self._cancelled.discard(key)
 
         preknown = {}
         unknown = set()
@@ -787,19 +803,21 @@ class LezhinWeb:
             pending = set(unknown)
             planned = planned_total
             meta["planned_pages"] = planned
-            self._set_progress(alias=alias, episode_i=0, episode_total=len(ordered), seq=0,
+            self._set_progress(key, alias=alias, episode_i=0, episode_total=len(ordered), seq=0,
                                page=0, episode_pages=None, planned=planned if not pending else None, pages_all=0)
             try:
                 for index, seq in enumerate(ordered, start=1):
                     written = 0
                     try:
+                        if self._is_cancelled(key):
+                            raise _DownloadCancelled
                         filename, pages, page_total = self._prepared_episode(
                             info, by_seq[seq], buy=buy, page_total=preknown.get(seq))
                         if seq in pending:
                             planned += page_total or 0
                             pending.discard(seq)
                         meta["planned_pages"] = planned
-                        self._set_progress(episode_i=index, seq=seq, page=0, episode_pages=page_total,
+                        self._set_progress(key, episode_i=index, seq=seq, page=0, episode_pages=page_total,
                                            planned=planned if not pending else None,
                                            pages_all=meta["pages_downloaded"])
                         prefix = f"{seq:03d} {filename}"[:120]
@@ -807,18 +825,28 @@ class LezhinWeb:
                             archive.writestr(f"{prefix}/page_{page_no:03d}.webp", data)
                             written += 1
                             meta["pages_downloaded"] += 1
-                            self._set_progress(page=page_no, pages_all=meta["pages_downloaded"])
+                            self._set_progress(key, page=page_no, pages_all=meta["pages_downloaded"])
                             part = stream.take()
                             if part:
                                 yield part
+                            if self._is_cancelled(key):
+                                raise _DownloadCancelled
                         if not written:
                             raise ValueError("no pages")
                         meta["done"].append(seq)
+                    except _DownloadCancelled:
+                        meta["cancelled"] = True
+                        if written:
+                            meta["partial"][seq] = written
+                        part = stream.take()
+                        if part:
+                            yield part
+                        break
                     except Exception as error:
                         meta["errors"][seq] = str(error)
                         pending.discard(seq)
                         meta["planned_pages"] = planned
-                        self._set_progress(planned=planned if not pending else None)
+                        self._set_progress(key, planned=planned if not pending else None)
                         if written:
                             meta["partial"][seq] = written
                         part = stream.take()
@@ -875,8 +903,12 @@ def auth_status(force=False):
     return APP.auth_status(force=force)
 
 
-def progress():
-    return APP.progress()
+def progress(key=""):
+    return APP.progress(key)
+
+
+def cancel(key=""):
+    APP.cancel(key)
 
 
 def download(alias, seq):
@@ -888,5 +920,5 @@ def download_many(alias, seqs, buy=False):
     return APP.download_episodes(alias, seqs, buy=buy)
 
 
-def stream_many(alias, seqs, buy=False):
-    return APP.download_episodes_stream(alias, seqs, buy=buy)
+def stream_many(alias, seqs, buy=False, key=""):
+    return APP.download_episodes_stream(alias, seqs, buy=buy, key=key)
