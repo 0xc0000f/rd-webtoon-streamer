@@ -170,6 +170,8 @@ class LezhinWeb:
         self._proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
         self._req_counts = Counter()
         self._counts_lock = threading.Lock()
+        self._progress = {}
+        self._progress_lock = threading.Lock()
         self._genres = {}
 
     def _load_token(self):
@@ -272,6 +274,36 @@ class LezhinWeb:
         with self._counts_lock:
             return dict(self._req_counts)
 
+    def _set_progress(self, **values):
+        with self._progress_lock:
+            self._progress.update(values)
+
+    def progress(self):
+        with self._progress_lock:
+            return dict(self._progress)
+
+    def _page_exists(self, base, query, number):
+        self._count_request(True, "HEAD", f"{base}/{number}.webp")
+        response = self.session.head(f"{base}/{number}.webp", params=query, timeout=30, proxies=self._proxies)
+        return response.status_code == 200
+
+    def _count_pages(self, base, query, hard_max=4096):
+        try:
+            if not self._page_exists(base, query, 1):
+                return 0
+            lo, hi = 1, 32
+            while hi < hard_max and self._page_exists(base, query, hi):
+                lo, hi = hi, hi * 2
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if self._page_exists(base, query, mid):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            return lo
+        except requests.RequestException:
+            return None
+
     def _request(self, method, url, *, auth=True, proxied=False, **kwargs):
         self.login()
         kwargs["proxies"] = self._proxies if proxied else None
@@ -286,6 +318,9 @@ class LezhinWeb:
                     headers["Authorization"] = f"Bearer {self.token}"
                     self._count_request(proxied, method, url)
                     response = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
+                if method == "GET" and response.status_code in (502, 503, 504) and attempt < 4:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
                 return response
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == 4:
@@ -628,11 +663,18 @@ class LezhinWeb:
             if not buy:
                 raise LezhinError("episode is not purchased")
             self.ensure_coins(episode["coin"])
-            self.purchase_episode(episode["id"], episode["coin"])
+            purchase_error = None
+            try:
+                self.purchase_episode(episode["id"], episode["coin"])
+            except LezhinError as error:
+                purchase_error = error
             purchased = self.is_purchased(info["alias"], episode["name"])
+            if not purchased and purchase_error is not None:
+                raise purchase_error
         if not purchased and int(episode.get("coin") or 0) > 0:
             raise LezhinError("episode is not purchased")
         base, query = self._signed_episode(info["comic_id"], episode, purchased)
+        page_total = self._count_pages(base, query)
         filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{info['title']} {episode['title']}").strip()
         seq = int(episode.get("seq") or 0)
         if not filename:
@@ -669,20 +711,24 @@ class LezhinWeb:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 while True:
                     batch = list(range(number, number + workers * 2))
+                    if page_total is not None:
+                        batch = [n for n in batch if n <= page_total]
+                        if not batch:
+                            return
                     for page, data in zip(batch, pool.map(fetch_page, batch)):
                         if data is None:
                             return
                         yield data
                     number = batch[-1] + 1
 
-        return filename, pages()
+        return filename, pages(), page_total
 
     def download_episode(self, alias, seq, buy=True):
         info = self.detail(alias)
         episode = next((x for x in info["episodes"] if x["seq"] == int(seq)), None)
         if not episode:
             raise LezhinError("episode not found")
-        filename, pages = self._prepared_episode(info, episode, buy=buy)
+        filename, pages, _page_total = self._prepared_episode(info, episode, buy=buy)
         return info, episode, filename, pages
 
     @staticmethod
@@ -722,16 +768,26 @@ class LezhinWeb:
         def chunks():
             stream = _ZipStream()
             archive = zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
+            meta["planned_pages"] = 0
+            self._set_progress(alias=alias, episode_i=0, episode_total=len(ordered), seq=0,
+                               page=0, episode_pages=None, planned=None, pages_all=0)
+            planned = 0
             try:
-                for seq in ordered:
+                for index, seq in enumerate(ordered, start=1):
                     written = 0
                     try:
-                        filename, pages = self._prepared_episode(info, by_seq[seq], buy=buy)
+                        filename, pages, page_total = self._prepared_episode(info, by_seq[seq], buy=buy)
+                        planned += page_total or 0
+                        meta["planned_pages"] = planned
+                        self._set_progress(episode_i=index, seq=seq, page=0, episode_pages=page_total,
+                                           planned=planned if index == len(ordered) else None,
+                                           pages_all=meta["pages_downloaded"])
                         prefix = f"{seq:03d} {filename}"[:120]
-                        for index, data in enumerate(pages, start=1):
-                            archive.writestr(f"{prefix}/page_{index:03d}.webp", data)
+                        for page_no, data in enumerate(pages, start=1):
+                            archive.writestr(f"{prefix}/page_{page_no:03d}.webp", data)
                             written += 1
                             meta["pages_downloaded"] += 1
+                            self._set_progress(page=page_no, pages_all=meta["pages_downloaded"])
                             part = stream.take()
                             if part:
                                 yield part
@@ -794,6 +850,10 @@ def balance():
 
 def auth_status(force=False):
     return APP.auth_status(force=force)
+
+
+def progress():
+    return APP.progress()
 
 
 def download(alias, seq):

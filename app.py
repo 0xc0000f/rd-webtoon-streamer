@@ -1506,13 +1506,20 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
  }finally{btn.disabled=false;btn.textContent='ZIP'}}
-async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
+ async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
  btn.disabled=true;const old=btn.textContent;let status='กำลังโหลด…';let total=0;const stop=$('lzstop');if(stop){stop.hidden=false;stop.disabled=false}
+ let prog={},live=true;
+ const lzStatus=()=>{let s=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;
+  if(prog.alias===LZ_ALIAS&&prog.episode_total){s+=` · ตอน ${prog.episode_i}/${prog.episode_total}`;
+   if(prog.episode_pages)s+=` · หน้าง ${prog.page}/${prog.episode_pages}`;
+   if(prog.planned)s+=` · ${Math.round(100*(prog.pages_all||0)/prog.planned)}%`}
+  return s};
+ const poll=(async()=>{while(live){try{const x=await(await fetch('/api/lz/progress')).json();if(x&&x.alias)prog=x}catch(e){}await new Promise(s=>setTimeout(s,1200))}})();
  LZ_AC=new AbortController();
  try{const r=await fetch('/api/lz/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:LZ_ALIAS,seqs,buy:$('lzbuy').checked}),signal:LZ_AC.signal});
   if(!r.ok){const e=await r.json().catch(()=>({error:'โหลดไม่สำเร็จ'}));throw new Error(e.error||'โหลดไม่สำเร็จ')}
   const parts=[];
-  if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;status=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;btn.textContent=status}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength;status=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;btn.textContent=status}
+  if(r.body){const reader=r.body.getReader();while(true){const{value,done}=await reader.read();if(done)break;parts.push(value);total+=value.length;status=lzStatus();btn.textContent=status}}else{const x=await r.arrayBuffer();parts.push(new Uint8Array(x));total=x.byteLength;status=lzStatus();btn.textContent=status}
   const blob=new Blob(parts,{type:r.headers.get('Content-Type')||'application/zip'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
@@ -1521,7 +1528,7 @@ async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เ�
  }catch(e){
   status=e.name==='AbortError'?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:'โหลดไม่สำเร็จ';
   if(e.name!=='AbortError')alert(e.message||'โหลดไม่สำเร็จ');
- }finally{LZ_AC=null;if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
+ }finally{live=false;LZ_AC=null;if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
@@ -1867,6 +1874,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json(LZ.auth_status(force=force))
             except Exception as error:
                 return self._json({"ok": False, "error": str(error)}, 500)
+        if p == "/api/lz/progress":
+            return self._json(LZ.progress())
         if p == "/api/lz/download":
             alias = (qs.get("alias") or [""])[0].strip("/")
             seq = (qs.get("seq") or ["0"])[0]
