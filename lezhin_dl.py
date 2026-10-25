@@ -175,6 +175,8 @@ class LezhinWeb:
         self._req_counts = Counter()
         self._counts_lock = threading.Lock()
         self._progress = {}
+        self._progress_ts = {}
+        self._progress_ttl = max(60.0, float(os.environ.get("LEZHIN_PROGRESS_TTL") or 1800))
         self._progress_lock = threading.Lock()
         self._cancelled = set()
         self._genres = {}
@@ -279,17 +281,33 @@ class LezhinWeb:
         with self._counts_lock:
             return dict(self._req_counts)
 
+    def _gc_progress_locked(self):
+        now = time.monotonic()
+        stale = [k for k, ts in self._progress_ts.items() if now - ts > self._progress_ttl]
+        if len(self._progress) > 64:
+            ordered = sorted(self._progress_ts.items(), key=lambda kv: kv[1])
+            stale += [k for k, _ in ordered[: len(self._progress) // 2] if k not in stale]
+        for key in stale:
+            self._progress.pop(key, None)
+            self._progress_ts.pop(key, None)
+            self._cancelled.discard(key)
+
     def _set_progress(self, key="", **values):
         with self._progress_lock:
             self._progress.setdefault(key, {}).update(values)
+            self._progress_ts[key] = time.monotonic()
+            self._gc_progress_locked()
 
     def progress(self, key=""):
         with self._progress_lock:
+            self._gc_progress_locked()
             return dict(self._progress.get(key) or {})
 
     def cancel(self, key=""):
         with self._progress_lock:
             self._cancelled.add(key)
+            self._progress_ts.setdefault(key, time.monotonic())
+            self._gc_progress_locked()
 
     def _is_cancelled(self, key):
         with self._progress_lock:
