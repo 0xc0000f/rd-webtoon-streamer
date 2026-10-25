@@ -10,9 +10,11 @@ import secrets
 import threading
 import time
 import zipfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image
@@ -165,8 +167,9 @@ class LezhinWeb:
 
             session_seed = hashlib.sha256(self.email.encode("utf-8")).hexdigest()[:16]
         proxy_url = _proxy_with_session(proxy_url, session_seed or "default")
-        if proxy_url:
-            self.session.proxies = {"http": proxy_url, "https": proxy_url}
+        self._proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        self._req_counts = Counter()
+        self._counts_lock = threading.Lock()
         self._genres = {}
 
     def _load_token(self):
@@ -233,8 +236,10 @@ class LezhinWeb:
             if not force and self._token_valid():
                 return self.token or ""
             adult_cookie = self._snapshot_cookie("_LZ_FS")
+            login_url = f"{API_ROOT}/api/authentication/login"
+            self._count_request(False, "POST", login_url)
             response = self.session.post(
-                f"{API_ROOT}/api/authentication/login",
+                login_url,
                 headers=self._headers(json_body=True),
                 json={
                     "email": self.email,
@@ -258,16 +263,28 @@ class LezhinWeb:
             self._save_cookies()
             return token
 
-    def _request(self, method, url, *, auth=True, **kwargs):
+    def _count_request(self, proxied, method, url):
+        route = f"{'proxy' if proxied and self._proxies else 'direct'} {method} {urlparse(url).path}"
+        with self._counts_lock:
+            self._req_counts[route] += 1
+
+    def request_counts(self):
+        with self._counts_lock:
+            return dict(self._req_counts)
+
+    def _request(self, method, url, *, auth=True, proxied=False, **kwargs):
         self.login()
+        kwargs["proxies"] = self._proxies if proxied else None
         for attempt in range(5):
             try:
                 headers = self._headers(json_body="json" in kwargs)
                 headers.update(kwargs.pop("headers", {}))
+                self._count_request(proxied, method, url)
                 response = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
                 if auth and response.status_code == 401:
                     self.login(force=True)
                     headers["Authorization"] = f"Bearer {self.token}"
+                    self._count_request(proxied, method, url)
                     response = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
                 return response
             except (requests.ConnectionError, requests.Timeout):
@@ -311,6 +328,7 @@ class LezhinWeb:
             "balance": data,
             "usable": self.usable(data),
             "auth_dir": str(self.auth_dir),
+            "request_counts": self.request_counts(),
         }
 
     @staticmethod
@@ -473,6 +491,7 @@ class LezhinWeb:
         response = self._request(
             "POST",
             f"{PAYVERSE_ROOT}/payment/payverse/reserve",
+            proxied=True,
             json={
                 "store": "web",
                 "idCoinProduct": self.coin_product_id,
@@ -518,6 +537,7 @@ class LezhinWeb:
             f"{PAYVERSE_ROOT}/payment/payverse/webhook/{self.user_id}",
             json=body,
             auth=False,
+            proxied=True,
         )
         response.raise_for_status()
         return response.json()
@@ -575,6 +595,7 @@ class LezhinWeb:
         response = self._request(
             "GET",
             f"{API_ROOT}/lz-api/v2/cloudfront/signed-url/generate",
+            proxied=True,
             params={
                 "contentId": comic_id,
                 "episodeId": episode["id"],
@@ -620,9 +641,11 @@ class LezhinWeb:
         def fetch_page(number):
             headers = self._headers()
             headers["x-referer"] = API_ROOT
+            image_url = f"{base}/{number}.webp"
             for attempt in range(5):
                 try:
-                    response = self.session.get(f"{base}/{number}.webp", params=query, headers=headers, timeout=60)
+                    self._count_request(True, "GET", image_url)
+                    response = self.session.get(image_url, params=query, headers=headers, timeout=60, proxies=self._proxies)
                     if response.status_code == 404:
                         return None
                     response.raise_for_status()
