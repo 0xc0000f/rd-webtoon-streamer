@@ -773,7 +773,8 @@ class LezhinWeb:
         def pages():
             number = 1
             workers = max(1, min(32, int(os.environ.get("LEZHIN_PAGE_WORKERS") or 16)))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            pool = ThreadPoolExecutor(max_workers=workers)
+            try:
                 while True:
                     batch = list(range(number, number + workers * 2))
                     if page_total is not None:
@@ -785,6 +786,8 @@ class LezhinWeb:
                             return
                         yield data
                     number = batch[-1] + 1
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
         return filename, pages(), page_total
 
