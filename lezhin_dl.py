@@ -862,6 +862,7 @@ class LezhinWeb:
             try:
                 for index, seq in enumerate(ordered, start=1):
                     written = 0
+                    page_total = None
                     try:
                         if self._is_cancelled(key):
                             raise _DownloadCancelled
@@ -898,6 +899,8 @@ class LezhinWeb:
                         break
                     except Exception as error:
                         meta["errors"][seq] = str(error)
+                        if seq not in pending and page_total:
+                            planned -= max(0, page_total - written)
                         pending.discard(seq)
                         meta["planned_pages"] = planned
                         self._set_progress(key, planned=planned if not pending else None)
