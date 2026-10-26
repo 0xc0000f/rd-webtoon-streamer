@@ -1526,13 +1526,13 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   const blob=new Blob(parts,{type:r.headers.get('Content-Type')||'application/zip'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
-  const cancelled=LZ_STOP>0;
-  status=cancelled?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:status;
-  alert(cancelled?`หยุดแล้ว · บันทึก ZIP สวนที่โหลดได (${(total/1048576).toFixed(1)}MB) บันทึกไฟล์แล้ว`:`บันทึก ZIP ${seqs.length} ตอนแล้ว (${(total/1048576).toFixed(1)}MB) · มี log ใน _download_report.json`);
+  const cancelled=LZ_STOP>0,mb=(total/1048576).toFixed(1);
+  status=cancelled?`หยุดแล้ว ${mb}MB`:`บันทึกแล้ว ${mb}MB`;
+  alert(cancelled?`หยุดแล้ว · บันทึก ZIP สวนที่โหลดได (${mb}MB) บันทึกไฟล์แล้ว`:`บันทึก ZIP ${seqs.length} ตอนแล้ว (${mb}MB) · มี log ใน _download_report.json`);
  }catch(e){
   status=e.name==='AbortError'?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:'โหลดไม่สำเร็จ';
   if(e.name!=='AbortError')alert(e.message||'โหลดไม่สำเร็จ');
- }finally{live=false;LZ_AC=null;LZ_KEY='';LZ_STOP=0;if(stop){stop.hidden=true;stop.disabled=false;stop.textContent='หยุด'}btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
+ }finally{live=false;LZ_AC=null;LZ_KEY='';LZ_STOP=0;if(stop){stop.hidden=true;stop.disabled=false;stop.textContent='หยุด'}btn.textContent=status;btn.disabled=!lzSeqs().length;setTimeout(()=>{if(!LZ_AC)lzUpdate()},6000)}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
