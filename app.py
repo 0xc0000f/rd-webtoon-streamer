@@ -1682,7 +1682,10 @@ class H(BaseHTTPRequestHandler):
                 selected = sorted(set(seqs))
                 title = info.get("title") or alias
                 label = title if len(selected) == 1 else f"{title} {selected[0]}-{selected[-1]}"
-                ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", label)[:70].strip() or alias
+                ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", label)[:70].strip()
+                if ascii_name and not re.search(r"[A-Za-z]", ascii_name):
+                    ascii_name = (alias + "-" + ascii_name).strip("-")
+                ascii_name = ascii_name or alias
                 fn = urllib.parse.quote(label + ".zip")
                 iterator = iter(chunks)
                 first = None
