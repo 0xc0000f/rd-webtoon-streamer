@@ -489,6 +489,8 @@ class LezhinWeb:
             item = self._alias_fallback(query)
             if item is not None:
                 return {"q": query, "count": 1, "items": [item]}
+        joined = re.sub(r"[^a-z0-9]+", "_", query.lower()).strip("_")[:60]
+        exact = self._alias_fallback(joined) if len(query.split()) > 1 and len(joined) >= 3 else None
         if total == 0 and len(query.split()) > 1:
             merged = {}
             for token in query.split():
@@ -504,7 +506,12 @@ class LezhinWeb:
                     if key not in merged:
                         merged[key] = item
             fallback = sorted(merged.values(), key=lambda item: item["updated"], reverse=True)[:limit]
+            if exact is not None:
+                fallback = [exact] + [i for i in fallback if i["alias"] != joined]
             return {"q": query, "count": len(fallback), "items": fallback}
+        if exact is not None:
+            items = [exact] + [i for i in items if i["alias"] != joined][: limit - 1]
+            total = len(items)
         return {"q": query, "count": total, "items": items}
 
     def _rsc_body(self, alias):
