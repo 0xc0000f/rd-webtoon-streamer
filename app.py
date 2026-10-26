@@ -1484,8 +1484,10 @@ async function search(){const q=$('q').value.trim();if(!q)return;const out=$('ou
  let h=`<h3>${esc(q)} <span class=count>${j.count} เรื่อง</span></h3><div class=grid>`;
  (j.items||[]).forEach(x=>{h+=`<div class=card onclick="openComic('${esc(x.alias)}')"><img loading=lazy src="${esc(x.cover)}" onerror="this.hidden=true"><b>${esc(x.title)}</b><span>${esc(x.artists||'—')}<br><span class=age>${esc(x.rating)}</span></span></div>`});
  out.innerHTML=h+'</div>'}
-let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set(),LZ_AC=null,LZ_KEY='';
-async function lzStop(){try{if(LZ_KEY)await fetch('/api/lz/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:LZ_KEY})})}catch(e){}if(LZ_AC)LZ_AC.abort()}
+let LZ_ALIAS='',LZ_TITLE='',LZ_EPISODES=[],LZ_SEL=new Set(),LZ_AC=null,LZ_KEY='',LZ_STOP=0;
+async function lzStop(){if(LZ_STOP)return;try{if(LZ_KEY)await fetch('/api/lz/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:LZ_KEY})})}catch(e){}
+ LZ_STOP=Date.now();const s=$('lzstop');if(s){s.disabled=true;s.textContent='กำลังหยุด…'}
+ setTimeout(()=>{if(LZ_STOP&&LZ_AC&&Date.now()-LZ_STOP>=85000)LZ_AC.abort()},90000)}
 function lzSeqs(){return [...LZ_SEL].sort((a,b)=>a-b)}
 function lzUpdate(){const n=lzSeqs().length;const btn=$('lzdl');if(btn){btn.disabled=!n;btn.textContent=n?`ดาวน์โหลด ${n} ตอน`:'เลือกตอนก่อน'}
  document.querySelectorAll('.lzep').forEach(x=>{LZ_SEL.has(+x.value)?x.checked=true:x.checked=false})}
@@ -1507,7 +1509,7 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   a.href=url;a.download=alias+'-'+seq+'.zip';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
  }finally{btn.disabled=false;btn.textContent='ZIP'}}
  async function lzDl(btn){const seqs=lzSeqs();if(!seqs.length)return alert('เลือกตอนก่อน');
- LZ_KEY='k'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+ LZ_KEY='k'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);LZ_STOP=0;
  btn.disabled=true;const old=btn.textContent;let status='กำลังโหลด…';let total=0;const stop=$('lzstop');if(stop){stop.hidden=false;stop.disabled=false}
  let prog={},live=true;
  const lzStatus=()=>{let s=`โหลดแล้ว ${(total/1048576).toFixed(1)}MB`;
@@ -1524,12 +1526,13 @@ async function download(alias,seq,btn){btn.disabled=true;btn.textContent='กำ
   const blob=new Blob(parts,{type:r.headers.get('Content-Type')||'application/zip'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');
   a.href=url;a.download=lzZipName(seqs.length>1?seqs[0]+'-'+seqs[seqs.length-1]:String(seqs[0]));document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
-  status=`บันทึก ${seqs.length} ตอน (${(total/1048576).toFixed(1)}MB)`;
-  alert(`บันทึก ZIP ${seqs.length} ตอนแล้ว (${(total/1048576).toFixed(1)}MB) · มี log ใน _download_report.json`);
+  const cancelled=LZ_STOP>0;
+  status=cancelled?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:status;
+  alert(cancelled?`หยุดแล้ว · บันทึก ZIP สวนที่โหลดได (${(total/1048576).toFixed(1)}MB) บันทึกไฟล์แล้ว`:`บันทึก ZIP ${seqs.length} ตอนแล้ว (${(total/1048576).toFixed(1)}MB) · มี log ใน _download_report.json`);
  }catch(e){
   status=e.name==='AbortError'?`หยุดแล้ว ${(total/1048576).toFixed(1)}MB`:'โหลดไม่สำเร็จ';
   if(e.name!=='AbortError')alert(e.message||'โหลดไม่สำเร็จ');
- }finally{live=false;LZ_AC=null;LZ_KEY='';if(stop)stop.hidden=true;btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
+ }finally{live=false;LZ_AC=null;LZ_KEY='';LZ_STOP=0;if(stop){stop.hidden=true;stop.disabled=false;stop.textContent='หยุด'}btn.textContent=status;btn.disabled=!lzSeqs().length;lzUpdate()}}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
 </script></body></html>"""
 
