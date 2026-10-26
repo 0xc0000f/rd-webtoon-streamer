@@ -448,6 +448,30 @@ class LezhinWeb:
             "updated": int(item.get("updatedAt") or 0),
         }
 
+    def _alias_fallback(self, query):
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,60}", query):
+            return None
+        try:
+            body = self._rsc_body(query)
+            match = CONTENT_RE.search(body)
+            if not match:
+                return None
+            content = json.JSONDecoder().raw_decode(body[match.end() - 1 :])[0]
+            comic_id = int(content["id"])
+            display = content.get("display") or {}
+            return {
+                "id": comic_id,
+                "alias": query,
+                "title": (display.get("title") or query).replace(" [연재]", ""),
+                "artists": ", ".join(x.get("name", "") for x in content.get("artists") or [] if x.get("name")),
+                "genres": content.get("genres") or [],
+                "cover": f"{CDN_PUBLIC_ROOT}/v2/comics/{comic_id}/images/tall.jpg?updated={content.get('updatedAt', 0)}&width=420",
+                "rating": "19+" if content.get("rating") == 19 or content.get("isAdult") else "ALL",
+                "updated": int(content.get("updatedAt") or 0),
+            }
+        except (LezhinError, ValueError, KeyError, TypeError, requests.RequestException):
+            return None
+
     def search(self, query, limit=30):
         self.login()
         query = (query or "").strip()
@@ -461,6 +485,10 @@ class LezhinWeb:
             total, items = 0, []
         except (requests.ConnectionError, requests.Timeout):
             raise
+        if total == 0 and " " not in query:
+            item = self._alias_fallback(query)
+            if item is not None:
+                return {"q": query, "count": 1, "items": [item]}
         if total == 0 and len(query.split()) > 1:
             merged = {}
             for token in query.split():
