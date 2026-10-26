@@ -711,17 +711,22 @@ class LezhinWeb:
         seq = int(episode.get("seq") or 0)
         if not filename:
             filename = f"{info['alias']} {seq}"
+        signed = {"base": base, "query": query, "resigns": 0}
 
         def fetch_page(number):
             headers = self._headers()
             headers["x-referer"] = API_ROOT
-            image_url = f"{base}/{number}.webp"
-            for attempt in range(5):
+            for attempt in range(6):
                 try:
+                    image_url = f"{signed['base']}/{number}.webp"
                     self._count_request(True, "GET", image_url)
-                    response = self.session.get(image_url, params=query, headers=headers, timeout=60, proxies=self._proxies)
+                    response = self.session.get(image_url, params=signed["query"], headers=headers, timeout=60, proxies=self._proxies)
                     if response.status_code == 404:
                         return None
+                    if response.status_code == 403 and signed["resigns"] < 3:
+                        signed["base"], signed["query"] = self._signed_episode(info["comic_id"], episode, purchased)
+                        signed["resigns"] += 1
+                        continue
                     response.raise_for_status()
                     data = response.content
                     if info["image_shuffle"]:
@@ -733,7 +738,7 @@ class LezhinWeb:
                         error,
                         (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError),
                     ) or status >= 500
-                    if not transient or attempt == 4:
+                    if not transient or attempt == 5:
                         raise
                     time.sleep(0.4 * (attempt + 1))
 
