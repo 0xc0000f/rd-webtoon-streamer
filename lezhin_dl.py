@@ -157,8 +157,8 @@ class LezhinWeb:
         self.adult = int(os.environ.get("LEZHIN_ADULT") or 2)
         self.country = os.environ.get("LEZHIN_COUNTRY") or "th"
         self.coin_product_id = int(os.environ.get("LEZHIN_COIN_PRODUCT_ID") or 5163012002480128)
-        self.coin_price = int(os.environ.get("LEZHIN_COIN_PRICE") or 5000)
-        self.coin_size = int(os.environ.get("LEZHIN_COIN_SIZE") or 25)
+        self.coin_price = float(os.environ.get("LEZHIN_COIN_PRICE") or 5.99)
+        self.coin_size = int(os.environ.get("LEZHIN_COIN_SIZE") or 240)
         self.lock = threading.RLock()
         self.token = None
         self._load_token()
