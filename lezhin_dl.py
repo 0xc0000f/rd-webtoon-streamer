@@ -235,9 +235,22 @@ class LezhinWeb:
     def _snapshot_cookie(self, name):
         return next((cookie for cookie in self.session.cookies if cookie.name == name), None)
 
+    @staticmethod
+    def _fs_payload(cookie):
+        try:
+            part = cookie.value.split(".")[0]
+            part += "=" * (-len(part) % 4)
+            return json.loads(base64.urlsafe_b64decode(part))
+        except Exception:
+            return {}
+
     def _restore_cookie(self, cookie):
         if cookie is None:
             return
+        current = self._snapshot_cookie(cookie.name)
+        if current is not None and self._fs_payload(cookie).get("AD") != self._fs_payload(current).get("AD"):
+            if not self._fs_payload(cookie).get("AD"):
+                return
         self.session.cookies.set_cookie(cookie)
 
     def login(self, force=False):
