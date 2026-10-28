@@ -675,7 +675,13 @@ class LezhinWeb:
             via_api = None
         if via_api is not None:
             return via_api
-        body = self._rsc_body(alias)
+        try:
+            body = self._rsc_body(alias)
+        except (requests.RequestException, LezhinError):
+            raise LezhinError(
+                f"cannot load {alias}: pass comic_id (numeric id from search results) "
+                "— adult titles are only reachable via the API host"
+            )
         content_match = CONTENT_RE.search(body)
         episodes_match = EPISODES_RE.search(body)
         if not content_match or not episodes_match:
