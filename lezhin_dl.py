@@ -724,7 +724,12 @@ class LezhinWeb:
 
     def _payverse_webhook(self, reserved):
         amount = float(reserved["requestAmount"])
+        req_date = str(reserved.get("reqDate") or "")
         now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        # the controller only answers SUCCESS when approvalDay equals the
+        # reserve reqDate verbatim (14 digits); an 8-char date yields FAIL.
+        approval_day = req_date if len(req_date) == 14 else now[:8]
+        approval_time = req_date[8:14] if len(req_date) == 14 else now[8:]
         body = {
             "type": "PAYMENT",
             "mid": reserved["mid"],
@@ -742,8 +747,8 @@ class LezhinWeb:
             "approvalNo": f"AP{reserved['orderId']}",
             "approvalCurrency": reserved["requestCurrency"],
             "approvalAmount": amount,
-            "approvalDay": now[:8],
-            "approvalTime": now[8:],
+            "approvalDay": approval_day,
+            "approvalTime": approval_time,
             "mallReserved": "",
             "billKey": "",
             "sign": reserved["sign"],
@@ -758,6 +763,27 @@ class LezhinWeb:
         response.raise_for_status()
         return response.json()
 
+    def _payverse_complete(self, reserved):
+        body = {
+            "billkeyReq": reserved.get("billkeyReq") or "",
+            "resultStatus": "SUCCESS",
+            "resultCode": "0000",
+            "resultMessage": "success",
+            "tid": f"t_{reserved['orderId']}",
+            "orderId": reserved["orderId"],
+            "mallReserved": "",
+            "schemeGroup": "card",
+            "schemeCode": "0000",
+            "billKey": "",
+            "membershipId": int(self.user_id),
+        }
+        response = self._request(
+            "PUT",
+            f"{PAYVERSE_ROOT}/payment/payverse/complete",
+            json=body,
+        )
+        return response.json()
+
     def add_coins(self, packages=1):
         with self.lock:
             balance = self.get_balance()
@@ -768,6 +794,7 @@ class LezhinWeb:
                     reserved = self._payverse_reserve()
                     webhook = self._payverse_webhook(reserved)
                     if webhook.get("receiveResult") == "SUCCESS":
+                        self._payverse_complete(reserved)
                         for _ in range(8):
                             time.sleep(0.25)
                             balance = self.get_balance()
@@ -779,6 +806,11 @@ class LezhinWeb:
                         break
                     time.sleep(0.35)
                 if not completed:
+                    if webhook.get("receiveResult") == "SUCCESS":
+                        raise LezhinError(
+                            "payverse order stuck PENDING — the gateway only "
+                            "credits coins after a real payment window approval"
+                        )
                     raise LezhinError("coin webhook did not credit coins")
             return balance
 
