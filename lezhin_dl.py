@@ -20,6 +20,7 @@ import requests
 from PIL import Image
 
 API_ROOT = "https://www.lezhin.com"
+API_V2 = os.environ.get("LEZHIN_API_V2") or "https://api.lezhin.com/v2"
 CDN_IMAGE_ROOT = "https://rcdn.lezhin.com"
 CDN_PUBLIC_ROOT = "https://ccdn.lezhin.com"
 PAYVERSE_ROOT = "https://lezhin-web.lezhin.com"
@@ -426,12 +427,22 @@ class LezhinWeb:
     def auth_status(self, force=False):
         self.login(force=force)
         alias = (os.environ.get("LEZHIN_STATUS_ALIAS") or "favoriteboy").strip("/")
+        status_id = (os.environ.get("LEZHIN_STATUS_ID") or "").strip()
+        display_alias = alias if not status_id else f"id:{status_id}"
         web_error = ""
         try:
-            body = self._rsc_body(alias)
-            web_ok = bool(CONTENT_RE.search(body) and EPISODES_RE.search(body))
-            if not web_ok:
-                web_error = "comic page did not contain content or episodes"
+            if status_id:
+                eps = self._api("GET", f"contents/{int(status_id)}/episodes").json()
+                if eps.get("code") != 0 or not eps.get("data"):
+                    raise LezhinError(f"content {status_id} episodes check failed: {eps.get('description')}")
+                web_ok = True
+            else:
+                info = self._detail_via_api(alias)
+                if info is None:
+                    body = self._rsc_body(alias)
+                    if not (CONTENT_RE.search(body) and EPISODES_RE.search(body)):
+                        raise LezhinError("comic page did not contain content or episodes")
+                web_ok = True
         except Exception as error:
             web_ok = False
             web_error = str(error)
@@ -446,7 +457,7 @@ class LezhinWeb:
             "has_jsessionid": any(cookie.name == "JSESSIONID" for cookie in self.session.cookies),
             "web_ok": web_ok,
             "web_error": web_error,
-            "status_alias": alias,
+            "status_alias": display_alias,
             "balance": data,
             "usable": self.usable(data),
             "auth_dir": str(self.auth_dir),
@@ -460,7 +471,7 @@ class LezhinWeb:
     def _load_genres(self):
         if self._genres:
             return self._genres
-        response = self._request("GET", f"{API_ROOT}/lz-api/v2/genres")
+        response = self._request("GET", f"{API_V2}/genres")
         response.raise_for_status()
         for item in response.json().get("data", []):
             names = item.get("genre") or {}
@@ -589,19 +600,39 @@ class LezhinWeb:
         response.encoding = "utf-8"
         return response.text
 
-    def detail(self, alias):
-        self.login()
-        body = self._rsc_body(alias)
-        content_match = CONTENT_RE.search(body)
-        episodes_match = EPISODES_RE.search(body)
-        if not content_match or not episodes_match:
-            raise LezhinError("comic page is missing content or episodes")
-        decoder = json.JSONDecoder()
-        content = decoder.raw_decode(body[content_match.end() - 1 :])[0]
-        episodes = decoder.raw_decode(body[episodes_match.end() - 1 :])[0]
+    def _api(self, method, path, **kwargs):
+        return self._request(method, f"{API_V2}/{path.lstrip('/')}", **kwargs)
+
+    def _resolve_alias(self, alias):
+        try:
+            _, items = self._advanced_search_items(alias, 60)
+        except (requests.RequestException, requests.HTTPError):
+            return None
+        for item in items:
+            if item.get("alias") == alias:
+                return item
+        return None
+
+    def _detail_via_api(self, alias):
+        resolved = self._resolve_alias(alias)
+        if resolved is None:
+            return None
+        return self._detail_by_id(alias, int(resolved["id"]))
+
+    def _detail_by_id(self, alias, comic_id):
+        content = self._api("GET", f"contents/{int(comic_id)}").json()
+        if content.get("code") != 0 or not content.get("data"):
+            return None
+        content = content["data"]
+        episodes = self._api("GET", f"contents/{int(comic_id)}/episodes").json()
+        if episodes.get("code") != 0 or not episodes.get("data"):
+            return None
+        return self._detail_result(content.get("alias") or alias, int(comic_id), content, episodes["data"])
+
+    def _detail_result(self, alias, comic_id, content, episodes):
         genre_names = self._load_genres()
         metadata = content.get("metadata") or {}
-        comic_id = int(content["id"])
+        display = content.get("display") or {}
         sorted_episodes = sorted(episodes, key=lambda item: int(item.get("seq") or 0))
         with ThreadPoolExecutor(max_workers=8) as pool:
             owned = list(pool.map(lambda episode: self.is_purchased(alias, episode["name"]), sorted_episodes))
@@ -622,15 +653,37 @@ class LezhinWeb:
         return {
             "alias": alias,
             "comic_id": comic_id,
-            "title": (content.get("display") or {}).get("title") or alias,
-            "synopsis": (content.get("display") or {}).get("synopsis") or "",
+            "title": display.get("title") or alias,
+            "synopsis": display.get("synopsis") or "",
             "artists": ", ".join(x.get("name", "") for x in content.get("artists") or [] if x.get("name")),
             "genres": [genre_names.get(x, x) for x in content.get("genres") or []],
-            "rating": "19+" if content.get("rating") == 19 or content.get("isAdult") else "ALL",
+            "rating": "19+" if content.get("rating") == 19 or content.get("isAdult") or content.get("adult") else "ALL",
             "image_shuffle": bool(metadata.get("imageShuffle")),
             "cover": f"{CDN_PUBLIC_ROOT}/v2/comics/{comic_id}/images/tall.jpg?updated={content.get('updatedAt', 0)}&width=420",
             "episodes": result_episodes,
         }
+
+    def detail(self, alias, comic_id=None):
+        self.login()
+        if comic_id:
+            by_id = self._detail_by_id(alias, int(comic_id))
+            if by_id is not None:
+                return by_id
+        try:
+            via_api = self._detail_via_api(alias)
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            via_api = None
+        if via_api is not None:
+            return via_api
+        body = self._rsc_body(alias)
+        content_match = CONTENT_RE.search(body)
+        episodes_match = EPISODES_RE.search(body)
+        if not content_match or not episodes_match:
+            raise LezhinError("comic page is missing content or episodes")
+        decoder = json.JSONDecoder()
+        content = decoder.raw_decode(body[content_match.end() - 1 :])[0]
+        episodes = decoder.raw_decode(body[episodes_match.end() - 1 :])[0]
+        return self._detail_result(alias, int(content["id"]), content, episodes)
 
     def is_purchased(self, alias, episode_name):
         self.login()
@@ -854,8 +907,8 @@ class LezhinWeb:
 
         return filename, pages(), page_total
 
-    def download_episode(self, alias, seq, buy=True):
-        info = self.detail(alias)
+    def download_episode(self, alias, seq, buy=True, comic_id=None):
+        info = self.detail(alias, comic_id=comic_id)
         episode = next((x for x in info["episodes"] if x["seq"] == int(seq)), None)
         if not episode:
             raise LezhinError("episode not found")
@@ -883,8 +936,8 @@ class LezhinWeb:
             ordered.append(value)
         return by_seq, ordered, missing
 
-    def download_episodes_stream(self, alias, seqs, buy=False, key=""):
-        info = self.detail(alias)
+    def download_episodes_stream(self, alias, seqs, buy=False, key="", comic_id=None):
+        info = self.detail(alias, comic_id=comic_id)
         by_seq, ordered, missing = self._ordered_seq_selection(info, seqs)
         meta = {
             "done": [],
@@ -984,8 +1037,8 @@ class LezhinWeb:
 
         return info, meta, chunks()
 
-    def download_episodes(self, alias, seqs, buy=False):
-        info, meta, chunks = self.download_episodes_stream(alias, seqs, buy=buy)
+    def download_episodes(self, alias, seqs, buy=False, comic_id=None):
+        info, meta, chunks = self.download_episodes_stream(alias, seqs, buy=buy, comic_id=comic_id)
         if chunks is None:
             raise LezhinError("no valid episodes selected")
         blob = b"".join(chunks)
@@ -1010,8 +1063,8 @@ def search(query, limit=30):
     return APP.search(query, limit)
 
 
-def detail(alias):
-    return APP.detail(alias)
+def detail(alias, comic_id=None):
+    return APP.detail(alias, comic_id=comic_id)
 
 
 def balance():
@@ -1031,14 +1084,14 @@ def cancel(key=""):
     APP.cancel(key)
 
 
-def download(alias, seq):
-    info, episode, filename, pages = APP.download_episode(alias, seq)
+def download(alias, seq, comic_id=None):
+    info, episode, filename, pages = APP.download_episode(alias, seq, comic_id=comic_id)
     return info, episode, filename, APP.stream_zip(info, episode, filename, pages)
 
 
-def download_many(alias, seqs, buy=False):
-    return APP.download_episodes(alias, seqs, buy=buy)
+def download_many(alias, seqs, buy=False, comic_id=None):
+    return APP.download_episodes(alias, seqs, buy=buy, comic_id=comic_id)
 
 
-def stream_many(alias, seqs, buy=False, key=""):
-    return APP.download_episodes_stream(alias, seqs, buy=buy, key=key)
+def stream_many(alias, seqs, buy=False, key="", comic_id=None):
+    return APP.download_episodes_stream(alias, seqs, buy=buy, key=key, comic_id=comic_id)
