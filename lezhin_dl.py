@@ -259,7 +259,7 @@ class LezhinWeb:
         try:
             response = self.session.post(
                 refresh_url,
-                headers=self._headers(),
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36", "x-lz-locale": "ko-KR"},
                 timeout=15,
                 proxies=self._proxies,
             )
