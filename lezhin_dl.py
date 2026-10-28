@@ -253,10 +253,53 @@ class LezhinWeb:
                 return
         self.session.cookies.set_cookie(cookie)
 
+    def _refresh(self):
+        refresh_url = f"{API_ROOT}/api/authentication/refresh-token"
+        self._count_request(False, "POST", refresh_url)
+        try:
+            response = self.session.post(
+                refresh_url,
+                headers=self._headers(),
+                timeout=15,
+                proxies=self._proxies,
+            )
+        except requests.RequestException:
+            return False
+        if response.status_code != 200:
+            return False
+        try:
+            tokens = response.json().get("tokens") or {}
+        except ValueError:
+            return False
+        access = tokens.get("accessToken")
+        if not access:
+            return False
+        adult_cookie = self._snapshot_cookie("_LZ_FS")
+        self.token = access
+        self._restore_cookie(adult_cookie)
+        self._save_token()
+        self._save_cookies()
+        return True
+
+    def _reauth(self):
+        if self._refresh():
+            return True
+        try:
+            self.login(force=True)
+        except (requests.HTTPError, LezhinError):
+            return False
+        return bool(self.token)
+
     def login(self, force=False):
         with self.lock:
             if not force and self._token_valid():
+                expiry = self._token_expiry()
+                if self.token and isinstance(expiry, int) and expiry - time.time() < 900 and self._refresh():
+                    return self.token or ""
                 return self.token or ""
+            if self.token and not force:
+                if self._refresh():
+                    return self.token or ""
             adult_cookie = self._snapshot_cookie("_LZ_FS")
             login_url = f"{API_ROOT}/api/authentication/login"
             self._count_request(False, "POST", login_url)
@@ -358,8 +401,8 @@ class LezhinWeb:
                 self._count_request(proxied, method, url)
                 response = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
                 if auth and response.status_code == 401:
-                    self.login(force=True)
-                    headers["Authorization"] = f"Bearer {self.token}"
+                    if self._reauth():
+                        headers["Authorization"] = f"Bearer {self.token}"
                     self._count_request(proxied, method, url)
                     response = self.session.request(method, url, headers=headers, timeout=30, **kwargs)
                 if method == "GET" and response.status_code in (502, 503, 504) and attempt < 4:
