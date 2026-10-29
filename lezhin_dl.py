@@ -669,6 +669,10 @@ class LezhinWeb:
             by_id = self._detail_by_id(alias, int(comic_id))
             if by_id is not None:
                 return by_id
+            if not alias:
+                raise LezhinError(
+                    f"comic_id {int(comic_id)} not found or not accessible via the API"
+                )
         try:
             via_api = self._detail_via_api(alias)
         except (requests.RequestException, ValueError, KeyError, TypeError):
