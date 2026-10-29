@@ -215,7 +215,7 @@ class LezhinWeb:
     def _token_expiry(self):
         return _decode_jwt_payload(self.token or "").get("exp")
 
-    def _token_valid(self, margin=120):
+    def _token_valid(self, margin=300):
         expiry = self._token_expiry()
         return isinstance(expiry, int) and time.time() < expiry - margin
 
