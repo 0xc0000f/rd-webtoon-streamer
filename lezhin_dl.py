@@ -792,6 +792,7 @@ class LezhinWeb:
         with self.lock:
             balance = self.get_balance()
             expected = self.usable(balance) + self.coin_size
+            stuck_orders = []
             for _ in range(max(1, int(packages))):
                 completed = False
                 for _ in range(4):
@@ -808,15 +809,29 @@ class LezhinWeb:
                                 break
                     if completed:
                         break
+                    if webhook.get("receiveResult") == "SUCCESS":
+                        stuck_orders.append(reserved["orderId"])
+                        break
                     time.sleep(0.35)
                 if not completed:
-                    if webhook.get("receiveResult") == "SUCCESS":
+                    if stuck_orders:
                         raise LezhinError(
-                            "payverse order stuck PENDING — the gateway only "
-                            "credits coins after a real payment window approval"
+                            "coin gateway now requires a real payment-window approval: "
+                            f"{len(stuck_orders)} order(s) stuck PENDING ({', '.join(stuck_orders)}). "
+                            "Top up once at https://www.lezhin.com/ko/payment (any card via PayVerse), "
+                            "then retry — coins land on this account and unlock every episode."
                         )
                     raise LezhinError("coin webhook did not credit coins")
             return balance
+
+    def wait_for_credit(self, expected_usable, timeout=180):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            balance = self.get_balance()
+            if self.usable(balance) >= int(expected_usable):
+                return balance
+            time.sleep(2)
+        raise LezhinError("no coin credit observed yet — payment window not approved?")
 
     def ensure_coins(self, required):
         balance = self.get_balance()
