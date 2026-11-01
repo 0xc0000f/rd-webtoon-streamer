@@ -1961,6 +1961,25 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(zip_bytes)
             return
+        if p == "/api/lz/freshness":
+            alias = (qs.get("alias") or [""])[0].strip("/")
+            comic_id = (qs.get("comic_id") or [""])[0].strip() or None
+            try:
+                info = LZ.detail(alias, comic_id=comic_id)
+                eps = info.get("episodes") or []
+                match = TD.find(info.get("title") or "")
+                if not match:
+                    return self._json({"title": info.get("title"), "lezhin_total": len(eps), "mirror": None, "missing_tail": [e.get("title") or e.get("name") for e in eps[-6:]]})
+                have = {TD._norm(c["title"]) for c in TD.chapters(match["id"])}
+                missing = [e for e in eps if TD._norm(e.get("title") or e.get("name") or "") not in have]
+                return self._json({
+                    "title": info.get("title"),
+                    "lezhin_total": len(eps),
+                    "mirror": {"brand": match.get("brand"), "id": match["id"], "total": len(have)},
+                    "missing_tail": [{"seq": e.get("seq"), "title": e.get("title") or e.get("name")} for e in missing[-30:]],
+                })
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
         if p.startswith("/api/td/"):
             try:
                 if p == "/api/td/search":
