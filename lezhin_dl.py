@@ -481,10 +481,12 @@ class LezhinWeb:
         if not episode:
             raise LezhinError("episode not found")
         self.use_rental_pass(info["comic_id"], episode["id"])
+        access = self._episode_access_type(info, episode)
         return {
             "alias": info["alias"],
             "seq": int(seq),
-            "purchased": self.is_purchased(info["alias"], episode["name"]),
+            "access": access,
+            "purchased": access == "RP" or self.is_purchased(info["alias"], episode["name"]),
             "balance": self.get_balance(),
         }
 
@@ -922,7 +924,16 @@ class LezhinWeb:
         self._save_cookies()
         return payload
 
-    def _signed_episode(self, comic_id, episode, purchased):
+    def _episode_access_type(self, info, episode):
+        response = self._request(
+            "GET",
+            f"{API_ROOT}/lz-api/contents/v3/{info['alias']}/episodes/"
+            f"{int(episode.get('seq') or 0)}?referrerViewType=NORMAL&objectType=comic",
+        )
+        payload = response.json() if response.content else {}
+        return ((payload.get("data") or {}).get("episode") or {}).get("firstCheckType") or "P"
+
+    def _signed_episode(self, comic_id, episode, purchased, check_type="P"):
         response = self._request(
             "GET",
             f"{API_ROOT}/lz-api/v2/cloudfront/signed-url/generate",
@@ -932,7 +943,7 @@ class LezhinWeb:
                 "episodeId": episode["id"],
                 "purchased": "true" if purchased else "false",
                 "q": 40,
-                "firstCheckType": "P",
+                "firstCheckType": check_type,
             },
             headers={"x-referer": API_ROOT},
         )
@@ -955,12 +966,17 @@ class LezhinWeb:
         if episode.get("not_for_sale"):
             raise LezhinError("episode is not sold separately")
         purchased = bool(episode.get("purchased"))
-        if not purchased and int(episode.get("coin") or 0) > 0 and rent:
-            try:
-                self.use_rental_pass(info["comic_id"], episode["id"])
-                purchased = self.is_purchased(info["alias"], episode["name"])
-            except LezhinError:
-                pass
+        check_type = "P"
+        if not purchased and int(episode.get("coin") or 0) > 0:
+            check_type = self._episode_access_type(info, episode)
+            if check_type != "RP" and rent:
+                try:
+                    self.use_rental_pass(info["comic_id"], episode["id"])
+                    check_type = self._episode_access_type(info, episode)
+                except LezhinError:
+                    pass
+            if check_type == "RP":
+                purchased = True
         if not purchased and int(episode.get("coin") or 0) > 0:
             if not buy:
                 raise LezhinError("episode is not purchased" + (" (rental pass not applicable)" if rent else ""))
@@ -975,14 +991,14 @@ class LezhinWeb:
                 raise purchase_error
         if not purchased and int(episode.get("coin") or 0) > 0:
             raise LezhinError("episode is not purchased")
-        base, query = self._signed_episode(info["comic_id"], episode, purchased)
+        base, query = self._signed_episode(info["comic_id"], episode, purchased, check_type)
         if page_total is None:
             page_total = self._count_pages(base, query)
         filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{info['title']} {episode['title']}").strip()
         seq = int(episode.get("seq") or 0)
         if not filename:
             filename = f"{info['alias']} {seq}"
-        signed = {"base": base, "query": query, "resigns": 0}
+        signed = {"base": base, "query": query, "resigns": 0, "check_type": check_type}
 
         def fetch_page(number):
             headers = self._headers()
@@ -995,7 +1011,7 @@ class LezhinWeb:
                     if response.status_code == 404:
                         return None
                     if response.status_code == 403 and signed["resigns"] < 3:
-                        signed["base"], signed["query"] = self._signed_episode(info["comic_id"], episode, purchased)
+                        signed["base"], signed["query"] = self._signed_episode(info["comic_id"], episode, purchased, signed["check_type"])
                         signed["resigns"] += 1
                         continue
                     response.raise_for_status()
@@ -1219,8 +1235,8 @@ def cancel(key=""):
     APP.cancel(key)
 
 
-def download(alias, seq, comic_id=None):
-    info, episode, filename, pages = APP.download_episode(alias, seq, comic_id=comic_id)
+def download(alias, seq, comic_id=None, rent=False):
+    info, episode, filename, pages = APP.download_episode(alias, seq, comic_id=comic_id, rent=rent)
     return info, episode, filename, APP.stream_zip(info, episode, filename, pages)
 
 

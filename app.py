@@ -1913,7 +1913,7 @@ class H(BaseHTTPRequestHandler):
             seq = (qs.get("seq") or ["0"])[0]
             comic_id = (qs.get("comic_id") or [""])[0].strip() or None
             try:
-                info, episode, filename, data = LZ.download(alias, seq, comic_id=comic_id)
+                info, episode, filename, data = LZ.download(alias, seq, comic_id=comic_id, rent=(qs.get("rent") or ["0"])[0].lower() in {"1", "true", "yes"})
                 fn = urllib.parse.quote(filename + ".zip")
                 ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", filename)[:70].strip() or (alias + "-" + str(seq))
                 self.send_response(200)
