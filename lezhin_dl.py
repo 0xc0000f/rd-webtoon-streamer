@@ -1003,6 +1003,12 @@ class LezhinWeb:
             if check_type == "RP":
                 purchased = True
         if not purchased and int(episode.get("coin") or 0) > 0:
+            try:
+                self._signed_episode(info["comic_id"], episode, False, check_type)
+                purchased = True
+            except LezhinError:
+                pass
+        if not purchased and int(episode.get("coin") or 0) > 0:
             if not buy:
                 raise LezhinError("episode is not purchased" + (" (rental pass not applicable)" if rent else ""))
             self.ensure_coins(episode["coin"])
