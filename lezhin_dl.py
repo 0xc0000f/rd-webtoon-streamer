@@ -329,6 +329,31 @@ class LezhinWeb:
             self._save_cookies()
             return token
 
+    def use_account(self, email, password):
+        if not email or not password:
+            raise LezhinError("email and password are required")
+        with self.lock:
+            same = email == self.email and password == self.password and self.user_id
+            self.email, self.password = email, password
+            if not same:
+                adult_cookie = self._snapshot_cookie("_LZ_FS")
+                self.token = None
+                self.user_id = 0
+                self._save_token()
+                try:
+                    self.cookie_file.unlink()
+                except OSError:
+                    pass
+                self.session = requests.Session()
+                self.login(force=True)
+                self._restore_cookie(adult_cookie)
+                self._save_cookies()
+            return {
+                "email": self.email,
+                "user_id": self.user_id,
+                "balance": self.get_balance(),
+            }
+
     def _count_request(self, proxied, method, url):
         route = f"{'proxy' if proxied and self._proxies else 'direct'} {method} {urlparse(url).path}"
         with self._counts_lock:
@@ -1250,3 +1275,7 @@ def stream_many(alias, seqs, buy=False, key="", comic_id=None, rent=False):
 
 def rent(alias, seq, comic_id=None):
     return APP.rent_episode(alias, seq, comic_id=comic_id)
+
+
+def use_account(email, password):
+    return APP.use_account(email, password)

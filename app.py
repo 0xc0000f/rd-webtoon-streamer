@@ -1622,6 +1622,11 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             data = {}
         p = urllib.parse.urlparse(self.path).path
+        if p.startswith("/api/lz/") and p != "/api/lz/login" and data.get("email") and data.get("password"):
+            try:
+                LZ.use_account(str(data["email"]).strip(), str(data["password"]))
+            except Exception as error:
+                return self._json({"error": str(error)}, 401)
         if p == "/api/search":
             q = (str(data.get("q") or "") or "").strip()
             if re.search(r"\d{6,}", q):
@@ -1665,6 +1670,11 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/lz/cancel":
             LZ.cancel(str(data.get("key") or ""))
             return self._json({"ok": True})
+        elif p == "/api/lz/login":
+            try:
+                return self._json(LZ.use_account(str(data.get("email") or "").strip(), str(data.get("password") or "")))
+            except Exception as error:
+                return self._json({"error": str(error)}, 401)
         elif p == "/api/lz/claim":
             ids = [str(x) for x in (data.get("ids") or [])] or None
             try:
@@ -1897,7 +1907,9 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"error": str(error)}, 500)
         if p == "/api/lz/balance":
             try:
-                return self._json(LZ.balance())
+                out = LZ.balance()
+                out["account"] = {"email": LZ.APP.email, "user_id": LZ.APP.user_id}
+                return self._json(out)
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
         if p == "/api/lz/status":
