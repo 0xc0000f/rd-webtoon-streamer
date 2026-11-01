@@ -182,3 +182,7 @@ def images(cid):
 
 def fetch(url):
     return TOONDAY.fetch_image(url)
+
+
+def search(query):
+    return TOONDAY.search(query)
