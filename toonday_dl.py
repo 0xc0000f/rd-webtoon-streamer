@@ -96,6 +96,10 @@ class ToonDay:
         import time
         key = (brand or "all") + "_" + genre
         cache_f = self.auth_dir / ("catalog_%s.json" % key)
+        if not cache_f.is_file():
+            bundled = Path(__file__).with_name("catalog") / ("catalog_%s.json" % key)
+            if bundled.is_file():
+                cache_f.write_bytes(bundled.read_bytes())
         if not refresh and cache_f.is_file() and time.time() - cache_f.stat().st_mtime < 24 * 3600:
             try:
                 return _json.loads(cache_f.read_text())
