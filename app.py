@@ -1676,6 +1676,15 @@ class H(BaseHTTPRequestHandler):
                 return self._json(LZ.coupon(str(data.get("code") or "")))
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
+        elif p == "/api/lz/rent":
+            try:
+                return self._json(LZ.rent(
+                    str(data.get("alias") or "").strip().strip("/"),
+                    int(data.get("seq") or 0),
+                    comic_id=str(data.get("comic_id") or "") or None,
+                ))
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
         elif p == "/api/lz/download":
             alias = str(data.get("alias") or "").strip().strip("/")
             raw = data.get("seqs") or []
@@ -1688,7 +1697,7 @@ class H(BaseHTTPRequestHandler):
             if not seqs:
                 return self._json({"error": "invalid episode list"}, 400)
             try:
-                info, meta, chunks = LZ.stream_many(alias, seqs, bool(data.get("buy")), key=str(data.get("key") or ""), comic_id=str(data.get("comic_id") or "") or None)
+                info, meta, chunks = LZ.stream_many(alias, seqs, bool(data.get("buy")), key=str(data.get("key") or ""), comic_id=str(data.get("comic_id") or "") or None, rent=bool(data.get("rent")))
                 if chunks is None:
                     return self._json(meta, 400)
                 selected = sorted(set(seqs))

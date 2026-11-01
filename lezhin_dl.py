@@ -463,6 +463,31 @@ class LezhinWeb:
         payload = response.json() if response.content else {}
         return {"http": response.status_code, "result": payload, "balance": self.get_balance()}
 
+    def use_rental_pass(self, comic_id, episode_id):
+        response = self._request(
+            "POST",
+            f"{API_ROOT}/lz-api/contents/v3/rental/use",
+            json={"contentId": int(comic_id), "episodeId": int(episode_id)},
+        )
+        payload = response.json() if response.content else {}
+        if response.status_code != 200 or payload.get("code") not in (0, None):
+            raise LezhinError(f"rental pass use failed: {payload}")
+        self._save_cookies()
+        return payload
+
+    def rent_episode(self, alias, seq, comic_id=None):
+        info = self.detail(alias, comic_id=comic_id)
+        episode = next((x for x in info["episodes"] if x["seq"] == int(seq)), None)
+        if not episode:
+            raise LezhinError("episode not found")
+        self.use_rental_pass(info["comic_id"], episode["id"])
+        return {
+            "alias": info["alias"],
+            "seq": int(seq),
+            "purchased": self.is_purchased(info["alias"], episode["name"]),
+            "balance": self.get_balance(),
+        }
+
     def auth_status(self, force=False):
         self.login(force=force)
         alias = (os.environ.get("LEZHIN_STATUS_ALIAS") or "favoriteboy").strip("/")
@@ -926,13 +951,19 @@ class LezhinWeb:
         base = f"{CDN_IMAGE_ROOT}/v2/comics/{comic_id}/episodes/{episode['id']}/contents/scrolls"
         return base, query
 
-    def _prepared_episode(self, info, episode, buy=True, page_total=None):
+    def _prepared_episode(self, info, episode, buy=True, page_total=None, rent=False):
         if episode.get("not_for_sale"):
             raise LezhinError("episode is not sold separately")
         purchased = bool(episode.get("purchased"))
+        if not purchased and int(episode.get("coin") or 0) > 0 and rent:
+            try:
+                self.use_rental_pass(info["comic_id"], episode["id"])
+                purchased = self.is_purchased(info["alias"], episode["name"])
+            except LezhinError:
+                pass
         if not purchased and int(episode.get("coin") or 0) > 0:
             if not buy:
-                raise LezhinError("episode is not purchased")
+                raise LezhinError("episode is not purchased" + (" (rental pass not applicable)" if rent else ""))
             self.ensure_coins(episode["coin"])
             purchase_error = None
             try:
@@ -1003,12 +1034,12 @@ class LezhinWeb:
 
         return filename, pages(), page_total
 
-    def download_episode(self, alias, seq, buy=True, comic_id=None):
+    def download_episode(self, alias, seq, buy=True, comic_id=None, rent=False):
         info = self.detail(alias, comic_id=comic_id)
         episode = next((x for x in info["episodes"] if x["seq"] == int(seq)), None)
         if not episode:
             raise LezhinError("episode not found")
-        filename, pages, _page_total = self._prepared_episode(info, episode, buy=buy)
+        filename, pages, _page_total = self._prepared_episode(info, episode, buy=buy, rent=rent)
         return info, episode, filename, pages
 
     @staticmethod
@@ -1032,7 +1063,7 @@ class LezhinWeb:
             ordered.append(value)
         return by_seq, ordered, missing
 
-    def download_episodes_stream(self, alias, seqs, buy=False, key="", comic_id=None):
+    def download_episodes_stream(self, alias, seqs, buy=False, key="", comic_id=None, rent=False):
         info = self.detail(alias, comic_id=comic_id)
         by_seq, ordered, missing = self._ordered_seq_selection(info, seqs)
         meta = {
@@ -1079,7 +1110,7 @@ class LezhinWeb:
                         if self._is_cancelled(key):
                             raise _DownloadCancelled
                         filename, pages, page_total = self._prepared_episode(
-                            info, by_seq[seq], buy=buy, page_total=preknown.get(seq))
+                            info, by_seq[seq], buy=buy, page_total=preknown.get(seq), rent=rent)
                         if seq in pending:
                             planned += page_total or 0
                             pending.discard(seq)
@@ -1133,8 +1164,8 @@ class LezhinWeb:
 
         return info, meta, chunks()
 
-    def download_episodes(self, alias, seqs, buy=False, comic_id=None):
-        info, meta, chunks = self.download_episodes_stream(alias, seqs, buy=buy, comic_id=comic_id)
+    def download_episodes(self, alias, seqs, buy=False, comic_id=None, rent=False):
+        info, meta, chunks = self.download_episodes_stream(alias, seqs, buy=buy, comic_id=comic_id, rent=rent)
         if chunks is None:
             raise LezhinError("no valid episodes selected")
         blob = b"".join(chunks)
@@ -1193,9 +1224,13 @@ def download(alias, seq, comic_id=None):
     return info, episode, filename, APP.stream_zip(info, episode, filename, pages)
 
 
-def download_many(alias, seqs, buy=False, comic_id=None):
-    return APP.download_episodes(alias, seqs, buy=buy, comic_id=comic_id)
+def download_many(alias, seqs, buy=False, comic_id=None, rent=False):
+    return APP.download_episodes(alias, seqs, buy=buy, comic_id=comic_id, rent=rent)
 
 
-def stream_many(alias, seqs, buy=False, key="", comic_id=None):
-    return APP.download_episodes_stream(alias, seqs, buy=buy, key=key, comic_id=comic_id)
+def stream_many(alias, seqs, buy=False, key="", comic_id=None, rent=False):
+    return APP.download_episodes_stream(alias, seqs, buy=buy, key=key, comic_id=comic_id, rent=rent)
+
+
+def rent(alias, seq, comic_id=None):
+    return APP.rent_episode(alias, seq, comic_id=comic_id)
