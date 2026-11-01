@@ -41,9 +41,6 @@ class ToonDay:
         self.auth_dir.mkdir(parents=True, exist_ok=True)
         self.cookie_file = self.auth_dir / "toonday_cookies.txt"
         self.lock = threading.RLock()
-        self._genres_cache = {}
-        self._genres_lock = threading.Lock()
-        self._genres_ts = 0.0
 
     def _new_session(self):
         jar = http.cookiejar.MozillaCookieJar(str(self.cookie_file))
@@ -94,13 +91,16 @@ class ToonDay:
                     pass
             return True
 
-    def _catalog(self, brand="lezhin", genre="blgl", max_pages=150):
+    def _catalog(self, brand=None, genre="normal", max_pages=200, refresh=False):
+        import json as _json
         import time
-        now = time.time()
-        with self._genres_lock:
-            cached = self._genres_cache.get(brand)
-            if cached and now - self._genres_ts < 6 * 3600:
-                return cached
+        key = (brand or "all") + "_" + genre
+        cache_f = self.auth_dir / ("catalog_%s.json" % key)
+        if not refresh and cache_f.is_file() and time.time() - cache_f.stat().st_mtime < 24 * 3600:
+            try:
+                return _json.loads(cache_f.read_text())
+            except Exception:
+                pass
         found = {}
         session = self._session()
         for page in range(1, max_pages + 1):
@@ -109,6 +109,9 @@ class ToonDay:
             if response.status_code != 200:
                 break
             html = response.text
+            cards = re.findall(r'data-comic-id="(\d+)"', html)
+            if not cards:
+                break
             for card in re.finditer(r'data-comic-id="(\d+)"(.*?)(?=data-comic-id|\Z)', html, re.S):
                 block = card.group(2)
                 title = re.search(r'<h6[^>]*title="([^"]+)"', block)
@@ -117,29 +120,40 @@ class ToonDay:
                 found.setdefault(_norm(title.group(1)), {"id": int(card.group(1)), "title": title.group(1)})
             if not re.search(r'/updatedAt/%d\b' % (page + 1), html):
                 break
-        with self._genres_lock:
-            self._genres_cache[brand] = found
-            self._genres_ts = now
+        cache_f.write_text(_json.dumps(found))
         return found
 
-    def find_title(self, title, brand="lezhin", genre="blgl"):
+    BRANDS = ["lezhin", "ridi", "toptoon", "kakao-page", "toomics", "mrblue", "peanutoon", "comico", "naver", "bomtoon"]
+    GENRES = ["normal", "adult", "blgl"]
+
+    def find_title(self, title, brand=None, genre=None):
         key = _norm(title)
-        catalog = self._catalog(brand=brand, genre=genre)
-        hit = catalog.get(key)
-        if hit:
-            return dict(hit)
-        if brand:
-            return self.find_title(title, brand=None, genre=genre)
+        genres = [genre] if genre else list(self.GENRES)
+        brands = [brand] if brand else list(self.BRANDS) + [None]
+        for br in brands:
+            for gen in genres:
+                try:
+                    catalog = self._catalog(brand=br, genre=gen)
+                except Exception:
+                    continue
+                hit = catalog.get(key)
+                if hit:
+                    return dict(hit, brand=br, genre=gen)
         return None
 
-    def search(self, query):
-        hits = []
-        seen = set()
-        for brand in ("lezhin", None):
-            for key, item in self._catalog(brand=brand).items():
-                if _norm(query) in key and item["id"] not in seen:
-                    seen.add(item["id"])
-                    hits.append(item)
+    def search(self, query, brand=None):
+        q = _norm(query)
+        hits, seen = [], set()
+        for br in ([brand] if brand else list(self.BRANDS)):
+            for gen in self.GENRES:
+                try:
+                    catalog = self._catalog(brand=br, genre=gen)
+                except Exception:
+                    continue
+                for key, item in catalog.items():
+                    if q and q in key and item["id"] not in seen:
+                        seen.add(item["id"])
+                        hits.append(dict(item, brand=br, genre=gen))
         return hits
 
     def chapters(self, mid):
@@ -168,7 +182,7 @@ class ToonDay:
 TOONDAY = ToonDay()
 
 
-def find(title, brand="lezhin"):
+def find(title, brand=None):
     return TOONDAY.find_title(title, brand=brand)
 
 
