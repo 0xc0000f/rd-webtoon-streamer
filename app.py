@@ -1665,6 +1665,17 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/lz/cancel":
             LZ.cancel(str(data.get("key") or ""))
             return self._json({"ok": True})
+        elif p == "/api/lz/claim":
+            ids = [str(x) for x in (data.get("ids") or [])] or None
+            try:
+                return self._json(LZ.claim(ids=ids))
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
+        elif p == "/api/lz/coupon":
+            try:
+                return self._json(LZ.coupon(str(data.get("code") or "")))
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
         elif p == "/api/lz/download":
             alias = str(data.get("alias") or "").strip().strip("/")
             raw = data.get("seqs") or []

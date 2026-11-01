@@ -424,6 +424,45 @@ class LezhinWeb:
             raise LezhinError(f"balance failed: {payload}")
         return payload["data"]
 
+    def redeem_presents(self, ids=None):
+        listing = self._request(
+            "GET", f"{API_ROOT}/lz-api/v2/users/{self.user_id}/presents?limit=50"
+        ).json()
+        seen = {item["id"]: item for item in listing.get("data") or []}
+        if ids:
+            targets = [seen[str(item)] for item in ids if str(item) in seen]
+        else:
+            targets = [item for item in seen.values() if item.get("state") == "valid"]
+        result = {"redeemed": 0, "bonus_coin": 0, "rental_passes": 0, "failed": []}
+        for item in targets:
+            response = self._request(
+                "POST", f"{API_ROOT}/lz-api/event/v3/presents/{item['id']}/redeem", json={}
+            )
+            payload = response.json() if response.content else {}
+            if response.status_code == 200 and payload.get("data"):
+                result["redeemed"] += 1
+                reward = item.get("reward") or {}
+                if reward.get("type") == "bonusCoin":
+                    result["bonus_coin"] += int(reward.get("amount") or 0)
+                if reward.get("type") == "freeRentalPass":
+                    result["rental_passes"] += int(reward.get("amount") or 0)
+            else:
+                result["failed"].append(f"{item['id']}:{response.status_code}")
+        result["balance"] = self.get_balance()
+        return result
+
+    def redeem_coupon(self, code):
+        code = str(code or "").strip()
+        if not code:
+            raise LezhinError("coupon code is empty")
+        response = self._request(
+            "POST",
+            f"{API_ROOT}/lz-api/event/v3/coupon/redeem",
+            json={"couponId": code, "userId": int(self.user_id)},
+        )
+        payload = response.json() if response.content else {}
+        return {"http": response.status_code, "result": payload, "balance": self.get_balance()}
+
     def auth_status(self, force=False):
         self.login(force=force)
         alias = (os.environ.get("LEZHIN_STATUS_ALIAS") or "favoriteboy").strip("/")
@@ -1127,6 +1166,14 @@ def detail(alias, comic_id=None):
 def balance():
     data = APP.get_balance()
     return {"balance": data, "usable": APP.usable(data)}
+
+
+def claim(ids=None):
+    return APP.redeem_presents(ids=ids)
+
+
+def coupon(code):
+    return APP.redeem_coupon(code)
 
 
 def auth_status(force=False):
