@@ -1970,6 +1970,16 @@ class H(BaseHTTPRequestHandler):
                 match = TD.find(info.get("title") or "")
                 if not match:
                     return self._json({"title": info.get("title"), "lezhin_total": len(eps), "mirror": None, "missing_tail": [e.get("title") or e.get("name") for e in eps[-6:]]})
+                if match.get("brand") == "toptoon":
+                    tp_map = TD.TOONDAY.toptoon_slug_map()
+                    entry = tp_map.get(TD._norm(info.get("title") or ""))
+                    origin_total = TD.TOONDAY.toptoon_ep_count(entry["slug"]) if entry else None
+                    return self._json({
+                        "title": info.get("title"),
+                        "origin": {"name": "toptoon", "slug": (entry or {}).get("slug"), "total": origin_total},
+                        "mirror": {"brand": match.get("brand"), "id": match["id"]},
+                        "mirror_total": len(TD.chapters(match["id"])),
+                    })
                 have = {TD._norm(c["title"]) for c in TD.chapters(match["id"])}
                 missing = [e for e in eps if TD._norm(e.get("title") or e.get("name") or "") not in have]
                 return self._json({

@@ -22,6 +22,7 @@ from pathlib import Path
 import requests
 
 BASE = "https://toonday1.com"
+BASE_TOPTOON = "https://toptoon.com"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
 
 
@@ -181,6 +182,35 @@ class ToonDay:
         response = self._session().get(url, timeout=60)
         response.raise_for_status()
         return response.content
+
+
+    def toptoon_ep_count(self, slug):
+        import requests as _rq
+        response = _rq.get(BASE_TOPTOON + "/comic/ep_list/" + slug, headers={"User-Agent": UA}, timeout=30)
+        return len(set(re.findall(r"data-episode-id='(\d+)'", response.text)))
+
+    def toptoon_slug_map(self, max_pages=6):
+        import requests as _rq
+        sess = getattr(self, "_tp_sess", None)
+        if sess is None:
+            sess = _rq.Session(); sess.headers.update({"User-Agent": UA}); self._tp_sess = sess
+        pairs = {}
+        for feed in ("weekly", "complete"):
+            for page in range(1, max_pages + 1):
+                url = BASE_TOPTOON + "/%s/%d" % (feed, page)
+                try:
+                    response = sess.get(url, timeout=30)
+                except _rq.RequestException:
+                    break
+                if response.status_code != 200:
+                    break
+                found = 0
+                for match in re.finditer(r'data-comic-idx="\d+"\s+data-comic-id="([^"]+)"\s+data-paid-count="\d+"[^>]*>.*?serial__title-text">([^<]+)<', response.text, re.S):
+                    pairs.setdefault(_norm(match.group(2)), {"slug": match.group(1)})
+                    found += 1
+                if not found:
+                    break
+        return pairs
 
 
 TOONDAY = ToonDay()
