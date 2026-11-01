@@ -987,12 +987,35 @@ class LezhinWeb:
         base = f"{CDN_IMAGE_ROOT}/v2/comics/{comic_id}/episodes/{episode['id']}/contents/scrolls"
         return base, query
 
+    def _en_variant(self, info, episode):
+        try:
+            response = self._request(
+                "GET",
+                f"{API_ROOT}/lz-api/contents/v3/{info['alias']}/episodes/"
+                f"{int(episode.get('seq') or 0)}?referrerViewType=DIRECT&objectType=comic",
+                headers={"x-lz-locale": "en-US"},
+            )
+            data = (response.json() or {}).get("data") or {}
+            en_ep = data.get("episode") or {}
+            if not data.get("id") or not en_ep.get("id"):
+                return None
+            variant = {"cid": int(data["id"]), "ep": {"id": int(en_ep["id"]), "updatedAt": en_ep.get("updatedAt") or 0}}
+            self._signed_episode(variant["cid"], variant["ep"], False, "P")
+            return variant
+        except (LezhinError, ValueError, TypeError):
+            return None
+
     def _prepared_episode(self, info, episode, buy=True, page_total=None, rent=False):
         if episode.get("not_for_sale"):
             raise LezhinError("episode is not sold separately")
         purchased = bool(episode.get("purchased"))
         check_type = "P"
+        sign_cid, sign_ep = info["comic_id"], episode
         if not purchased and int(episode.get("coin") or 0) > 0:
+            try:
+                self.redeem_presents()
+            except (LezhinError, KeyError, TypeError):
+                pass
             check_type = self._episode_access_type(info, episode)
             if check_type != "RP" and rent:
                 try:
@@ -1007,7 +1030,9 @@ class LezhinWeb:
                 self._signed_episode(info["comic_id"], episode, False, check_type)
                 purchased = True
             except LezhinError:
-                pass
+                alt = self._en_variant(info, episode)
+                if alt:
+                    sign_cid, sign_ep, check_type, purchased = alt["cid"], alt["ep"], "P", True
         if not purchased and int(episode.get("coin") or 0) > 0:
             if not buy:
                 raise LezhinError("episode is not purchased" + (" (rental pass not applicable)" if rent else ""))
@@ -1022,14 +1047,14 @@ class LezhinWeb:
                 raise purchase_error
         if not purchased and int(episode.get("coin") or 0) > 0:
             raise LezhinError("episode is not purchased")
-        base, query = self._signed_episode(info["comic_id"], episode, purchased, check_type)
+        base, query = self._signed_episode(sign_cid, sign_ep, purchased, check_type)
         if page_total is None:
             page_total = self._count_pages(base, query)
         filename = re.sub(r'[\\/:*?"<>|]+', " ", f"{info['title']} {episode['title']}").strip()
         seq = int(episode.get("seq") or 0)
         if not filename:
             filename = f"{info['alias']} {seq}"
-        signed = {"base": base, "query": query, "resigns": 0, "check_type": check_type}
+        signed = {"base": base, "query": query, "resigns": 0, "check_type": check_type, "cid": sign_cid, "ep": sign_ep}
 
         def fetch_page(number):
             headers = self._headers()
@@ -1042,7 +1067,7 @@ class LezhinWeb:
                     if response.status_code == 404:
                         return None
                     if response.status_code == 403 and signed["resigns"] < 3:
-                        signed["base"], signed["query"] = self._signed_episode(info["comic_id"], episode, purchased, signed["check_type"])
+                        signed["base"], signed["query"] = self._signed_episode(signed["cid"], signed["ep"], purchased, signed["check_type"])
                         signed["resigns"] += 1
                         continue
                     response.raise_for_status()
