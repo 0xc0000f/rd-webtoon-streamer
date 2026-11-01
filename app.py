@@ -6,6 +6,7 @@ import os, re, json, glob, time, threading, subprocess, sys, tempfile, zipfile, 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import lezhin_dl as LZ
+import toonday_dl as TD
 
 def _env_int(name, default):
     raw = (os.environ.get(name) or "").strip().strip("'\"")
@@ -1912,6 +1913,65 @@ class H(BaseHTTPRequestHandler):
                 return self._json(out)
             except Exception as error:
                 return self._json({"error": str(error)}, 500)
+        if p == "/api/lz/freedl":
+            alias = (qs.get("alias") or [""])[0].strip("/")
+            seq = int((qs.get("seq") or ["0"])[0] or 0)
+            comic_id = (qs.get("comic_id") or [""])[0].strip() or None
+            try:
+                info, episode, filename, data = LZ.download(alias, seq, comic_id=comic_id, rent=True)
+                zip_bytes, source = data, "lezhin"
+            except Exception as lezhin_error:
+                try:
+                    info = LZ.detail(alias, comic_id=comic_id) if alias or comic_id else None
+                    if info is None:
+                        raise lezhin_error
+                    match = TD.find(info.get("title") or "")
+                    if not match:
+                        raise lezhin_error
+                    eps = {int(e.get("seq") or 0): e for e in info.get("episodes") or []}
+                    wanted = eps.get(seq)
+                    if wanted is None:
+                        raise lezhin_error
+                    tmap = {TD._norm(c["title"]): c["id"] for c in TD.chapters(match["id"])}
+                    cid = tmap.get(TD._norm(wanted.get("title") or "")) or tmap.get(TD._norm(wanted.get("name") or ""))
+                    if cid is None:
+                        raise lezhin_error
+                    urls = TD.images(cid)
+                    if not urls:
+                        raise lezhin_error
+                    import io
+                    buffer = io.BytesIO()
+                    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+                        for index, url in enumerate(urls, 1):
+                            archive.writestr("page_%03d.jpg" % index, TD.fetch(url))
+                    title = info.get("title") or alias
+                    label = "%s %s" % (title, wanted.get("title") or wanted.get("name") or seq)
+                    filename = re.sub(r'[\\/:*?"<>|]+', " ", label).strip()
+                    zip_bytes, source = buffer.getvalue(), "toonday"
+                except Exception as toonday_error:
+                    return self._json({"error": str(lezhin_error), "toonday": str(toonday_error)}, 422)
+            fn = urllib.parse.quote(filename + ".zip")
+            ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "", filename)[:70].strip() or (alias + "-" + str(seq))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("X-Source", source)
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{ascii_name}.zip"; filename*=UTF-8\'\'{fn}')
+            self.send_header("Content-Length", str(len(zip_bytes)))
+            self.end_headers()
+            self.wfile.write(zip_bytes)
+            return
+        if p.startswith("/api/td/"):
+            try:
+                if p == "/api/td/search":
+                    return self._json({"q": (qs.get("q") or [""])[0], "items": TD.search((qs.get("q") or [""])[0])})
+                if p == "/api/td/episodes":
+                    return self._json({"chapters": TD.chapters(int((qs.get("mid") or ["0"])[0] or 0))})
+                if p == "/api/td/pages":
+                    return self._json({"images": TD.images(int((qs.get("cid") or ["0"])[0] or 0))})
+            except Exception as error:
+                return self._json({"error": str(error)}, 500)
+            return self._json({"error": "unknown toonday route"}, 404)
         if p == "/api/lz/status":
             force = (qs.get("force") or ["0"])[0].lower() in {"1", "true", "yes"}
             try:
